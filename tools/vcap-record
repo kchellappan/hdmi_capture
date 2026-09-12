@@ -81,6 +81,18 @@ def main() -> int:
                 print(f"{device.path}")
                 print(f"  granted: {neg.pixelformat} {neg.width}x{neg.height} "
                       f"@ {neg.fps_granted or '?'} fps")
+                # A rate the device does not advertise is coerced to one it does, and
+                # on this card that rounds *up* -- asking for 25 gets 30, which is 20%
+                # more data per hour than planned for. The driver reports the coercion
+                # honestly and the manifest records it, but it is easy to miss in a
+                # line that otherwise looks like confirmation.
+                if neg.fps_granted and abs(neg.fps_granted - args.fps) > 0.5:
+                    print(f"  NOTE: asked for {args.fps:g} fps, device gave "
+                          f"{neg.fps_granted:g}. It does not offer {args.fps:g}; run "
+                          f"vcap-list --modes to see what it does.", flush=True)
+                if (neg.width, neg.height) != (int(width), int(height)):
+                    print(f"  NOTE: asked for {width}x{height}, device gave "
+                          f"{neg.width}x{neg.height}.", flush=True)
                 print(f"  timestamps: {neg.timestamp_clock}, {neg.timestamp_source}")
                 if not neg.timestamps_are_monotonic:
                     print("  WARNING: timestamps are not on CLOCK_MONOTONIC, so they "

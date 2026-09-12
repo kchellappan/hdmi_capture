@@ -86,6 +86,12 @@ drives it with nothing to install. Measured on it, on live 1080p60 video over a 
 run: **14403 frames to disk at 59.98 fps, 4.27 GB** — at **14.5–19 MB/s, or 52–69 GB/hour**,
 which is the number to plan storage against.
 
+Frame rate is settable with `--fps` and honoured exactly — 60, 50, 30, 20 and 10 at 1080p.
+Storage scales linearly with it, since MJPEG compresses each frame independently: **60 Hz is
+53 GB/hour, 30 Hz is 27, 10 Hz is 9.** A rate the card does not offer is rounded *up* to one
+it does, so asking for 25 gets you 30; `vcap-record` says so when that happens. Full table
+in [docs/hardware.md](docs/hardware.md).
+
 Sustained capture loses about **one frame in 750** (0.132%, one roughly every 13 s), always
 a single frame and always right after a damaged one — the signature of a USB transfer error.
 A 15-second run loses none, so it only shows up over real durations. Both neighbours are

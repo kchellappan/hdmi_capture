@@ -27,6 +27,41 @@ live video:   MJPG 1920x1080 @ 60 -> 59.76 fps   236 KB/frame   dropped=0
 The frame size difference matters for planning: live content is about six times the data,
 **14.5-19 MB/s or 52-69 GB/hour**. See [formats.md](formats.md#sizing).
 
+## Frame rate is settable, and honoured exactly
+
+Unlike the resolution list, the rate control on this card is real. Measured at 1080p MJPEG,
+4 seconds per rate:
+
+| requested | measured | interval | KB/frame | rate | per hour |
+|---|---|---|---|---|---|
+| 60 | 60.01 | 16.66 ms | 236 | 14.6 MB/s | 53 GB |
+| 50 | 50.01 | 20.00 ms | 241 | 12.4 MB/s | 45 GB |
+| 30 | 29.75 | 33.33 ms | 246 | 7.5 MB/s | 27 GB |
+| 20 | 20.00 | 49.99 ms | 270 | 5.6 MB/s | 20 GB |
+| 10 | 10.00 | 100.00 ms | 241 | 2.5 MB/s | 9 GB |
+
+Frame size barely moves, because MJPEG is intra-only and each frame is compressed
+independently at the same quality. So **storage scales linearly with rate**, and halving the
+rate halves the bytes. If 53 GB/hour is the obstacle, dropping to 30 Hz is the cheapest fix
+available and costs nothing but temporal resolution.
+
+**A rate the card does not advertise is rounded up, not down.** It offers 60, 50, 30, 20 and
+10 at 1080p; asking for anything else gets the next one up:
+
+```
+requested  granted  measured
+   45       50.0     49.67
+   25       30.0     30.01
+   15       20.0     20.00
+  120       60.0     60.02
+```
+
+Rounding up is the unhelpful direction -- ask for 25 to save space and you get 30, a fifth
+more data per hour than planned. The driver does report the coercion back, `Negotiated`
+captures it, the manifest records `requested` and `granted` separately, and `vcap-record`
+prints a note when they differ. Nothing here silently substitutes a rate, but it is worth
+knowing the rounding goes that way before sizing a disk.
+
 ## Sustained capture drops about one frame in 750
 
 Over a 4-minute run -- 14403 frames, 4.27 GB, 59.98 fps effective -- the driver lost **19
