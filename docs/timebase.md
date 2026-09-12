@@ -47,8 +47,15 @@ it will look like a subtle control-tuning problem rather than a data bug.
 
 So:
 
-- The offset is **measured once per setup**, with `tools/vcap-latency` supplying the video
-  half and your control recording supplying the other.
+- The offset is **measured once per setup**. Two tools, for two situations:
+
+  | | |
+  |---|---|
+  | `vcap-glass-to-glass` | When the machine capturing is also the machine driving the display. Self-contained: it puts a clock on the screen and reads it back out of the captured frame, so both ends are already on one clock. |
+  | `vcap-latency` | When the source is something else -- a console, another machine. It supplies the video half only; your control recording supplies the other. |
+
+  Prefer the first where the setup allows it, because it needs nothing but this repo and
+  gives a number in one run.
 - It is **recorded** in `manifest.timebase.capture_offset_ns`, together with
   `capture_offset_method` describing how it was obtained.
 - It is **never folded into `ts_mono_ns`**. A corrected timestamp is indistinguishable
@@ -58,6 +65,21 @@ So:
 
 `capture_offset_ns` defaults to `null`, which means nobody has measured it. That is
 honest, and it is better than a plausible default that quietly becomes fact.
+
+### What glass-to-glass actually measures
+
+`vcap-glass-to-glass` reports the interval from a browser's `requestAnimationFrame`
+callback running to the kernel timestamping the frame that shows its output. That covers
+compositing, scanout, the cable, the card and the USB transfer.
+
+It is an **upper bound**, and the tool says so in its own output. A browser cannot report
+when a frame reached the glass; `requestAnimationFrame` fires before compositing, so the
+true photon-to-kernel interval is shorter by up to one refresh period -- about 16 ms at
+60 Hz. Subtract half a refresh period for a central estimate if you want one.
+
+The figure is reported uncorrected on purpose. A correction folded in silently cannot be
+undone by whoever reads the number later, which is the same reason the offset is never
+folded into frame timestamps.
 
 ## Aligning, in practice
 

@@ -156,11 +156,20 @@ The directories say which language; the name you import or include is `vcap` in 
 | `vcap_py/vcap/reader.py` | A recording opened for random access, segments presented as one sequence. |
 | `vcap_py/vcap/ring.py` | Latest-frame-wins, for live consumers. |
 | `vcap_py/vcap/session.py` | Source, writer and manifest wired together. |
+| `vcap_py/vcap/jpeg_dc.py` | A baseline JPEG decoder that recovers DC coefficients only, for the latency measurement. Not a substitute for a real decoder. |
+| `vcap_py/vcap/barcode.py` | The bar pattern that carries a timestamp through an HDMI round trip. |
 | `vcap_py/vcap/decode.py` | The dependency boundary, and why it is there. |
 | `vcap_py/vcap/export/` | MP4/MKV remux and frame extraction. For humans, not for training. |
 
 Tools: `vcap-list`, `vcap-probe`, `vcap-record`, `vcap-verify`, `vcap-view`,
-`vcap-latency`. All run from a checkout with no install step.
+`vcap-latency`, `vcap-glass-to-glass`. All run from a checkout with no install step.
+
+`vcap-glass-to-glass` measures the display-to-kernel latency in one run, when the machine
+capturing is also the one driving the display: it puts a bar-coded clock on screen and
+reads it back out of the captured frame. It decodes the pattern from JPEG DC coefficients
+alone — an eighth-scale luma image — so it needs no image library, which matters because a
+capture box that cannot run the measurement ships with an unmeasured offset. See
+[docs/timebase.md](docs/timebase.md).
 
 `vcap_cpp/` is a C++ capture implementation that writes the same format — for a recorder
 with no Python in the loop. It captures only; anything it writes is read back with the

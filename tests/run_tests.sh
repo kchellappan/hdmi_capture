@@ -47,6 +47,11 @@ run "index" python3 test_index.py
 run "storage" python3 test_storage.py
 echo
 
+echo "glass-to-glass measurement"
+run "jpeg_dc" python3 test_jpeg_dc.py
+run "barcode" python3 test_barcode.py
+echo
+
 echo "buffering"
 run "ring" python3 test_ring.py
 echo
