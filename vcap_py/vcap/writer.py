@@ -34,15 +34,28 @@ class WriterOverrun(Exception):
 class SegmentWriter:
     """Appends frames to a .mjpg/.idx pair, rolling over at a size limit.
 
-    Rollover exists because a single file for a long session is awkward in ways that
-    matter later: it cannot be moved off the machine until the session ends, a filesystem
-    with a 4 GB limit refuses it outright, and one corrupt region costs the whole
+    Rollover is a guardrail, not an organising principle. The unit that matters is the
+    episode, and the repo that submodules this one sets that by starting and stopping a
+    Session -- so the default is deliberately large enough that a normal episode is one
+    file and the split never appears. At the measured 14.5-19 MB/s, 16 GB is about
+    seventeen minutes of 1080p60.
+
+    It exists at all because a single file for a genuinely long session is awkward in ways
+    that matter later: exFAT on an external drive refuses anything over 4 GB, a failed
+    copy means restarting the whole transfer, and one corrupt region costs the whole
     recording. Segments are numbered and the manifest lists them in order.
+
+    A reader never sees them: Recording presents every segment as one continuous
+    sequence. That is a property worth keeping in mind, because the one bug this feature
+    has caused -- entries numbered per file rather than per session -- was invisible in
+    every single-segment recording, which at the previous 2 GB default was almost none of
+    them.
 
     Set `segment_bytes` to 0 to disable rollover.
     """
 
-    DEFAULT_SEGMENT_BYTES = 2 * 1024 * 1024 * 1024
+    # 16 GB: about seventeen minutes at 1080p60. See the note above on why this is large.
+    DEFAULT_SEGMENT_BYTES = 16 * 1024 * 1024 * 1024
 
     def __init__(self, directory: str, name: str = "session", *,
                  segment_bytes: int | None = None, fsync_every: int = 0):

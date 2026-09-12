@@ -8,7 +8,7 @@ deliberate, and what is known to be unfinished.
 
 There is one capture card: a MacroSilicon MS2130, USB `345f:2131`. Everything measured
 about it is in [docs/hardware.md](docs/hardware.md) — read that before changing anything in
-`vcap/source.py` or `vcap/device.py`.
+`vcap_py/vcap/source.py` or `vcap_py/vcap/device.py`.
 
 ```bash
 ./tests/run_tests.sh     # anywhere: no card, no dependencies
@@ -68,7 +68,7 @@ failed while the code was right — the comment recording that is in `tests/test
 **The dependency boundary is a line, not a ban.** The core is standard library only and
 `tests/check_stdlib_only.py` enforces it, because V4L2 needs nothing more and a submodule
 should cost nothing to install. Decoding is a genuine exception and lives behind
-`vcap/decode.py` and `vcap/export/`, listed in that check's `ALLOWED`. Adding to that list
+`vcap_py/vcap/decode.py` and `vcap_py/vcap/export/`, listed in that check's `ALLOWED`. Adding to that list
 is allowed; doing it without a reason in the commit message is not. Do not put a decoder,
 an encoder or a tensor in the core to preserve a tidy import graph.
 
@@ -85,12 +85,12 @@ Do not re-derive these:
 |---|---|
 | Frames arrive with no HDMI input connected | `docs/hardware.md`, and asserted in `tests/hardware.sh` |
 | The first frame after `STREAMON` is a headless fragment, on 33 of 34 starts | `docs/hardware.md`; the cause is stream-start alignment, *not* a missing HDMI input |
-| UVC descriptors advertise unsustainable modes | `docs/hardware.md`, and why `vcap/probe.py` exists |
-| `/dev/videoN` numbering moves; two nodes per device | `vcap/device.py` docstring |
+| UVC descriptors advertise unsustainable modes | `docs/hardware.md`, and why `vcap_py/vcap/probe.py` exists |
+| `/dev/videoN` numbering moves; two nodes per device | `vcap_py/vcap/device.py` docstring |
 | `/dev/video*` access is a logind ACL, not the `video` group | `docs/hardware.md`, `scripts/install_deps.sh` |
-| `v4l2_format` needs 4 bytes of padding after `type` | the `Format` docstring in `vcap/v4l2.py` |
-| A container loses the exact per-frame timestamp | `docs/formats.md`, and the header of `vcap/export/to_mp4.py` |
-| `at()` without a tolerance always returns a frame | `vcap/reader.py`, `docs/timebase.md` |
+| `v4l2_format` needs 4 bytes of padding after `type` | the `Format` docstring in `vcap_py/vcap/v4l2.py` |
+| A container loses the exact per-frame timestamp | `docs/formats.md`, and the header of `vcap_py/vcap/export/to_mp4.py` |
+| `at()` without a tolerance always returns a frame | `vcap_py/vcap/reader.py`, `docs/timebase.md` |
 
 ## Known unfinished
 
@@ -106,7 +106,7 @@ Do not re-derive these:
 - **`capture_offset_ns` is never populated automatically,** and should not be.
   `tools/vcap-latency` supplies only the video half of the measurement; the other half comes
   from a control recording this repo cannot see.
-- **`vcap/export/to_lerobot.py` is named in the README's design and not written.**
+- **`vcap_py/vcap/export/to_lerobot.py` is named in the README's design and not written.**
 - **Cross-machine capture is out of scope and cannot be rescued here.** The single-clock
   guarantee is the foundation of the format; two machines means two clocks and a different
   design.

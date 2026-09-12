@@ -7,7 +7,7 @@ other half, for this project, is
 ```
 your_project/
   third_party/
-    hdmi_capture/        this repo
+    hdmi_capture/        this repo -- put hdmi_capture/vcap_py on sys.path
     rpi_gamepad_bridge/  controls
   your_project/
     episode.py           yours: what an episode is
@@ -109,6 +109,10 @@ git -C third_party/hdmi_capture checkout <tag>
 git add third_party/hdmi_capture && git commit
 ```
 
-There is nothing to build and nothing to install. `sys.path.insert` on
-`third_party/hdmi_capture` is enough, because the core imports only the standard library.
-See `vcap/decode.py` for where that stops being true and why.
+There is nothing to build and nothing to install: `sys.path.insert` on
+`third_party/hdmi_capture/vcap_py` is enough, because the core imports only the standard
+library. See `vcap_py/vcap/decode.py` for where that stops being true and why.
+
+Note the path is `vcap_py`, not the repo root. The two implementations live in
+`vcap_py/` and `vcap_cpp/` so the directories say which language each one is, while the
+name you import or include stays `vcap` in both.
