@@ -68,14 +68,26 @@ honest, and it is better than a plausible default that quietly becomes fact.
 
 ### What glass-to-glass actually measures
 
-`vcap-glass-to-glass` reports the interval from a browser's `requestAnimationFrame`
-callback running to the kernel timestamping the frame that shows its output. That covers
-compositing, scanout, the cable, the card and the USB transfer.
+`vcap-glass-to-glass` opens a window of black and white bars encoding this process's own
+`CLOCK_MONOTONIC`, and reports the interval from drawing a frame to the kernel timestamping
+the captured frame that shows it. That covers compositing, scanout, the cable, the card and
+the USB transfer.
 
-It is an **upper bound**, and the tool says so in its own output. A browser cannot report
-when a frame reached the glass; `requestAnimationFrame` fires before compositing, so the
-true photon-to-kernel interval is shorter by up to one refresh period -- about 16 ms at
-60 Hz. Subtract half a refresh period for a central estimate if you want one.
+One process, one clock, no synchronisation -- which is the same property the rest of this
+document rests on. An earlier version served a page to a browser and had the page estimate
+the offset between its clock and the server's, NTP-style. That worked, and every part of it
+was a thing that could be wrong.
+
+The window does **not** need to be fullscreen, or any particular size, or in any particular
+place. The pattern carries its own reference bars at both ends, so the reader locates it.
+That is not a convenience: getting a window fullscreen on a chosen monitor is the least
+portable thing in this repo, and on GNOME/Wayland `--kiosk` silently did not take.
+
+It is an **upper bound**, and the tool says so in its own output. A toolkit cannot report
+when a frame reached the glass; the draw call returns before the compositor has shown
+anything, so the true photon-to-kernel interval is shorter by up to one refresh period --
+about 16 ms at 60 Hz. Subtract half a refresh period for a central estimate if you want
+one.
 
 The figure is reported uncorrected on purpose. A correction folded in silently cannot be
 undone by whoever reads the number later, which is the same reason the offset is never

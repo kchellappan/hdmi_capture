@@ -103,6 +103,17 @@ else
     ok "cmake" "absent; build.sh falls back to direct g++"
 fi
 
+# ------------------------------------------------------------------- latency measurement
+group "measuring capture latency with vcap-glass-to-glass (optional)"
+if python3 -c "import tkinter" 2>/dev/null; then
+    ok "tkinter" "present"
+else
+    # In the standard library, but Debian and Ubuntu package it separately -- so this is
+    # missing on a fresh install even though nothing was left out of Python.
+    missing "tkinter" "draws the timing pattern; nothing else here needs it"
+    ACTIONS+=("tkinter")
+fi
+
 # -------------------------------------------------------------------------------- export
 group "exporting to MP4 or MKV (optional; not needed to record)"
 if have ffmpeg; then
@@ -172,6 +183,8 @@ for action in "${ACTIONS[@]}"; do
             fi ;;
         compiler)
             confirm "install build-essential and cmake?" && apt_install build-essential cmake ;;
+        tkinter)
+            confirm "install python3-tk?" && apt_install python3-tk ;;
         ffmpeg)
             confirm "install ffmpeg?" && apt_install ffmpeg ;;
     esac

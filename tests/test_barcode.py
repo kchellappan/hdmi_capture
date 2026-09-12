@@ -12,10 +12,11 @@ import sys
 
 import fake_jpeg
 
-from vcap.barcode import (BAR_WIDTH, BAND_HEIGHT, BAND_TOP, DATA_BITS, SYNC_BARS,
+from vcap.barcode import (BAR_WIDTH, BAND_HEIGHT, BAND_TOP, DATA_BITS, RENDER_MARGIN,
+                          SYNC_BARS,
                           TOTAL_BARS, WRAP_MS, DecodeError, band_columns, checksum,
-                          decode_columns, decode_dc_image, encode, reconstruct_ms,
-                          sample_bars)
+                          decode_columns, decode_dc_image, encode, locate,
+                          reconstruct_ms, sample_bars)
 from vcap.jpeg_dc import decode_dc
 
 FAILURES: list[str] = []
@@ -27,11 +28,19 @@ def check(name: str, got, want) -> None:
 
 
 def render_bars(bars: list[bool], width: int = 240, white: int = 235, black: int = 18,
-                noise: int = 0) -> list[int]:
+                noise: int = 0, background: int = 24) -> list[int]:
+    """Synthetic column means for a pattern drawn across the full width.
+
+    The background is dark, matching what the renderer actually draws. An earlier version
+    used mid-gray 128, which sits within a rounding error of the black/white midpoint --
+    so it read as bright, merged with the trailing reference bar, and pushed the located
+    right edge to the frame boundary. That is a property of the test fixture, not of a
+    real capture, and it made a correct decoder look broken.
+    """
     out = []
     for x in range(width):
         index = int(((x + 0.5) / width) / BAR_WIDTH)
-        level = (white if bars[index] else black) if index < TOTAL_BARS else 128
+        level = (white if bars[index] else black) if index < TOTAL_BARS else background
         out.append(max(0, min(255, level + (noise if x % 3 == 0 else -noise))))
     return out
 
@@ -124,14 +133,128 @@ def main() -> int:
     except DecodeError as exc:
         FAILURES.append(f"end to end at 720p failed: {exc}")
 
-    # The diagnostic surface. A failed measurement reports what it saw, so these are
-    # load-bearing rather than incidental -- without them the tool's only output on a
-    # misconfigured display is "could not read the pattern".
+    # The pattern is located, not assumed, so a window of any size anywhere on the
+    # display decodes. This is the property that removes the fullscreen requirement --
+    # and it is not hypothetical: on GNOME/Wayland, Chrome's --kiosk did not take, the
+    # window covered 50-88% of the display, and the old fixed-geometry reader saw only
+    # desktop background.
+    def placed(value, width, x0, span, white=235, black=18, background=32):
+        bars = encode(value)
+        out = []
+        for x in range(width):
+            f = (x + 0.5) / width
+            if f < x0 or f >= x0 + span:
+                out.append(background)
+                continue
+            index = min(int((f - x0) / span * TOTAL_BARS), TOTAL_BARS - 1)
+            out.append(white if bars[index] else black)
+        return out
+
+    for name, args in (
+        ("spanning the frame", (240, 0.0, 1.0)),
+        ("in the right half", (240, 0.5, 0.38)),
+        ("the geometry Chrome actually produced", (240, 0.504, 0.379)),
+        ("a quarter of the frame", (240, 0.2, 0.25)),
+        ("at 720p capture width", (160, 0.1, 0.6)),
+    ):
+        try:
+            check(f"decodes {name}", decode_columns(placed(424242, *args)), 424242)
+        except DecodeError as exc:
+            FAILURES.append(f"decoding {name} raised: {exc}")
+
+    # Light wallpaper touching the window merges with the leading white bar, putting the
+    # outer left edge inside the wallpaper. The inner edges of the first and last bright
+    # runs are real bar boundaries regardless, which is what recovers this.
+    bars = encode(555)
+    bleed = []
+    for x in range(240):
+        f = (x + 0.5) / 240
+        if f < 0.3 or f >= 0.8:
+            bleed.append(250)
+        else:
+            bleed.append(235 if bars[min(int((f - 0.3) / 0.5 * TOTAL_BARS),
+                                         TOTAL_BARS - 1)] else 18)
+    try:
+        check("decodes with white wallpaper bleeding into the first bar",
+              decode_columns(bleed), 555)
+    except DecodeError as exc:
+        FAILURES.append(f"wallpaper case raised: {exc}")
+
+    # A pattern too small to sample must say so, rather than returning a wrong value.
+    try:
+        decode_columns(placed(1, 240, 0.2, 0.12))
+        FAILURES.append("an unreadably small pattern was decoded")
+    except DecodeError as exc:
+        if "too small" not in str(exc):
+            FAILURES.append(f"small pattern rejected unhelpfully: {exc}")
+
+    # The renderer's layout contract, checked without a toolkit.
+    #
+    # vcap-glass-to-glass draws the band inset by RENDER_MARGIN inside a window that can
+    # be any size, anywhere on the display. This reproduces that geometry exactly and
+    # feeds it through the reader, so the two cannot drift apart -- the part of the loop
+    # that tkinter would otherwise be needed to exercise.
+    def as_rendered(value, frame_width, window_x, window_width, background=24):
+        """Column means for a window drawn at window_x, as the card would capture it."""
+        bars = encode(value)
+        left = window_x + window_width * RENDER_MARGIN
+        pitch = window_width * (1.0 - 2 * RENDER_MARGIN) / TOTAL_BARS
+        out = []
+        for x in range(frame_width):
+            index = int((x + 0.5 - left) // pitch)
+            if 0 <= index < TOTAL_BARS:
+                out.append(235 if bars[index] else 18)
+            else:
+                out.append(background)
+        return out
+
+    for name, (frame_w, win_x, win_w) in (
+        ("filling the display", (240, 0, 240)),
+        ("a window half the display", (240, 60, 120)),
+        ("where Chrome actually put it", (240, 121, 91)),
+        ("hard against the left edge", (240, 0, 140)),
+        ("at 720p capture width", (160, 20, 120)),
+    ):
+        try:
+            check(f"the rendered layout decodes {name}",
+                  decode_columns(as_rendered(861234, frame_w, win_x, win_w)), 861234)
+        except DecodeError as exc:
+            FAILURES.append(f"rendered layout {name} raised: {exc}")
+
+    # How often a corrupted pattern still decodes to something. Measured rather than
+    # asserted, with a fixed seed so the number is stable.
+    #
+    # This exists because the validation is layered and each layer was easy to add without
+    # evidence it helped. Removing the bimodality check takes this from 6.7% to 9.6%,
+    # which is what justifies keeping it -- and the 6.7% floor is the four-bit checksum's
+    # collision rate, which is why the tool must also check the decoded timestamp against
+    # the frame's own. Neither fact was obvious before it was counted.
+    import random as _random
+    rng = _random.Random(7)
+    decoded = 0
+    trials = 1500
+    for _ in range(trials):
+        corrupted = encode(rng.getrandbits(DATA_BITS))
+        for _ in range(rng.randint(1, 3)):
+            k = rng.randrange(TOTAL_BARS)
+            corrupted[k] = not corrupted[k]
+        try:
+            decode_columns(render_bars(corrupted))
+            decoded += 1
+        except DecodeError:
+            pass
+    rate = 100.0 * decoded / trials
+    if rate > 8.0:
+        FAILURES.append(f"corrupted patterns decode {rate:.1f}% of the time, over the 8% "
+                        f"budget -- a validation layer has been weakened")
+
+    # The diagnostic surface, load-bearing because it is the only output of a failed run.
     columns = render_columns(424242, white=190, black=70)
-    bars = sample_bars(columns)
-    check("sample_bars returns one level per bar", len(bars), TOTAL_BARS)
-    check("it reports the white reference it actually saw", round(bars[0]), 190)
-    check("and the black one", round(bars[1]), 70)
+    left, pitch = locate(columns)
+    bars_seen = sample_bars(columns, left, pitch)
+    check("sample_bars returns one level per bar", len(bars_seen), TOTAL_BARS)
+    check("it reports the white reference it actually saw", round(bars_seen[0]), 190)
+    check("and the black one", round(bars_seen[1]), 70)
 
     data = fake_jpeg.encode_bars(encode(555), 240, 135, BAR_WIDTH, BAND_TOP, BAND_HEIGHT)
     image = decode_dc(data)

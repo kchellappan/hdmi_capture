@@ -165,11 +165,11 @@ Tools: `vcap-list`, `vcap-probe`, `vcap-record`, `vcap-verify`, `vcap-view`,
 `vcap-latency`, `vcap-glass-to-glass`. All run from a checkout with no install step.
 
 `vcap-glass-to-glass` measures the display-to-kernel latency in one run, when the machine
-capturing is also the one driving the display: it puts a bar-coded clock on screen and
-reads it back out of the captured frame. It decodes the pattern from JPEG DC coefficients
-alone — an eighth-scale luma image — so it needs no image library, which matters because a
-capture box that cannot run the measurement ships with an unmeasured offset. See
-[docs/timebase.md](docs/timebase.md).
+capturing is also the one driving the display: it opens a window of bar-coded timestamps
+and reads them back out of the captured frames — one process, one clock, no
+synchronisation. It decodes the pattern from JPEG DC coefficients alone, so it needs no
+image library, and the pattern locates itself, so the window needs no particular size or
+position. Needs `python3-tk`. See [docs/timebase.md](docs/timebase.md).
 
 `vcap_cpp/` is a C++ capture implementation that writes the same format — for a recorder
 with no Python in the loop. It captures only; anything it writes is read back with the

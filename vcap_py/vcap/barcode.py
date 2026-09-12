@@ -31,11 +31,40 @@ SYNC_BARS = 2
 
 DATA_BITS = 20               # low bits of a millisecond timestamp: wraps every ~17 min
 CHECK_BITS = 4               # XOR of the five data nibbles
-TOTAL_BARS = SYNC_BARS + DATA_BITS + CHECK_BITS
+
+# Two more at the end, mirroring the leading pair: black then white. These make the
+# pattern self-locating, which is what lets it be read out of a window of any size,
+# anywhere on the display.
+#
+# Without them the reader has to assume the band spans the viewport exactly, which in turn
+# forces the page to be fullscreen -- and getting a window fullscreen on a chosen monitor
+# is the least portable thing in this whole repo. Measured on GNOME/Wayland, Chrome's
+# --kiosk did not take effect and the window covered 50-88% of the display; the pattern
+# was captured perfectly and decoded to nothing, because the reader was sampling desktop
+# background.
+#
+# Because the bar before each is always the opposite colour, the first and last runs of
+# bright columns are each exactly one bar wide. That gives the left edge, the right edge
+# and the pitch, with no assumption about window geometry or scaling.
+TAIL_BARS = 2
+
+TOTAL_BARS = SYNC_BARS + DATA_BITS + CHECK_BITS + TAIL_BARS
+
+# Fraction of the drawing surface left as dark margin on each side of the band. Without
+# it the leading white bar touches the window edge, and anything bright behind the window
+# -- pale wallpaper, another window -- merges with it and moves the located left edge.
+# The reader recovers from that (see the inner-edge derivation in decode_columns), but it
+# costs a candidate geometry and there is no reason to make it work harder.
+RENDER_MARGIN = 0.05
 
 # Fraction of a bar's width sampled at its centre. Bar edges blur through scaling and
 # compression, so the margins are discarded rather than averaged in.
 SAMPLE_FRACTION = 0.5
+
+# How far a bar's sampled level may sit from the nearer reference level, as a fraction of
+# the gap between them. Generous enough for JPEG ringing and a scaled display, tight
+# enough that an alignment landing on bar boundaries is rejected.
+BIMODAL_TOLERANCE = 0.30
 
 # A decode is rejected when white and black are closer than this, as a fraction of the
 # full range. Below it the frame is too washed out, too dark, or not showing the pattern
@@ -57,7 +86,7 @@ def checksum(value: int) -> int:
 
 
 def encode(value: int) -> list[bool]:
-    """The bars for a 20-bit value: white, black, then data, then checksum.
+    """The bars for a 20-bit value: white, black, data, checksum, black, white.
 
     Bits are most-significant first, left to right, which is the order a person reading
     the screen would expect if they ever had to check one by hand.
@@ -70,6 +99,7 @@ def encode(value: int) -> list[bool]:
     check = checksum(value)
     for i in range(CHECK_BITS - 1, -1, -1):
         bars.append(bool((check >> i) & 1))
+    bars += [False, True]
     return bars
 
 
@@ -82,45 +112,67 @@ class DecodeError(ValueError):
     """The pattern could not be read out of this frame."""
 
 
-def sample_bars(columns: list[int]) -> list[float]:
-    """Mean level of each bar, before any thresholding.
+def bright_runs(columns: list[int], threshold: float) -> list[tuple[int, int]]:
+    """Contiguous spans of columns above `threshold`, as (start, end_exclusive)."""
+    runs: list[tuple[int, int]] = []
+    start = None
+    for x, value in enumerate(columns):
+        if value > threshold:
+            if start is None:
+                start = x
+        elif start is not None:
+            runs.append((start, x))
+            start = None
+    if start is not None:
+        runs.append((start, len(columns)))
+    return runs
 
-    Split out of decode_columns so a caller that failed to decode can report what it
-    actually saw. A latency tool whose only output is "could not read the pattern" leaves
-    someone staring at a display with no way to tell whether the page is in the wrong
-    place, the band is off screen, or the contrast is simply too low -- and that is the
-    normal first experience of a physical setup.
+
+def sample_bars(columns: list[int], left: float, pitch: float) -> list[float]:
+    """Mean level of each bar, given where the pattern starts and how wide a bar is.
+
+    Split out of the decode so a caller that failed can report what it actually saw. A
+    latency tool whose only output is "could not read the pattern" leaves someone staring
+    at a display with no way to tell what went wrong.
     """
-    width = len(columns)
     out: list[float] = []
+    half = pitch * SAMPLE_FRACTION / 2.0
     for bar in range(TOTAL_BARS):
-        centre = bar_centre_fraction(bar) * width
-        half = BAR_WIDTH * width * SAMPLE_FRACTION / 2.0
+        centre = left + (bar + 0.5) * pitch
         lo = max(0, int(round(centre - half)))
-        hi = min(width, max(lo + 1, int(round(centre + half))))
+        hi = min(len(columns), max(lo + 1, int(round(centre + half))))
         out.append(sum(columns[lo:hi]) / (hi - lo))
     return out
 
 
-def decode_columns(columns: list[int]) -> int:
-    """Recover the value from one row of column means spanning the full frame width.
-
-    Takes column means rather than an image so that the geometry logic is testable
-    without constructing one, and so the caller decides which rows to average.
-    """
-    if len(columns) < TOTAL_BARS * 2:
-        raise DecodeError(f"only {len(columns)} columns; too few to resolve "
-                          f"{TOTAL_BARS} bars")
-
-    samples = sample_bars(columns)
+def _decode_at(columns: list[int], left: float, pitch: float) -> int:
+    """Decode assuming the pattern starts at `left` with bars `pitch` columns wide."""
+    samples = sample_bars(columns, left, pitch)
     white, black = samples[0], samples[1]
     if white - black < MIN_CONTRAST * 255:
         raise DecodeError(
             f"contrast too low to read: reference bars came back {black:.0f} and "
             f"{white:.0f}. The pattern may not be on screen, or the display is off")
 
+    # Every sample must sit close to one reference level or the other.
+    #
+    # This is what makes it safe to search for the geometry at all. A wrong alignment
+    # samples across bar boundaries and comes back mid-range, while a correct one lands
+    # inside flat bars. Without this check the only validation is the checksum and the
+    # trailing pair -- six bits, against roughly a hundred candidate alignments, so wrong
+    # geometries passed routinely and returned confident nonsense.
+    margin = white - black
+    for level in samples:
+        if min(abs(level - white), abs(level - black)) > BIMODAL_TOLERANCE * margin:
+            raise DecodeError(
+                f"a bar sampled {level:.0f}, between the {black:.0f}/{white:.0f} "
+                f"references -- the alignment is wrong or the image is blurred")
+
     threshold = (white + black) / 2.0
-    bits = [s > threshold for s in samples[SYNC_BARS:]]
+    bits = [level > threshold for level in samples[SYNC_BARS:]]
+    # The trailing pair must be black then white, or this is not the pattern.
+    if bits[-2] or not bits[-1]:
+        raise DecodeError("trailing reference bars are not black-then-white")
 
     value = 0
     for bit in bits[:DATA_BITS]:
@@ -128,10 +180,121 @@ def decode_columns(columns: list[int]) -> int:
     check = 0
     for bit in bits[DATA_BITS:DATA_BITS + CHECK_BITS]:
         check = (check << 1) | int(bit)
-
     if check != checksum(value):
         raise DecodeError("checksum mismatch: a bar was misread")
     return value
+
+
+# A bar narrower than this cannot be sampled reliably once the capture has been through
+# JPEG and DC reduction: the sampled window collapses to a single column and bleeds from
+# its neighbours.
+MIN_PITCH_COLUMNS = 1.5
+
+
+def locate(columns: list[int]) -> tuple[float, float]:
+    """Where the pattern sits in this row, as (left edge, bar pitch), in columns.
+
+    The first bar is white and the second always black, so the first run of bright
+    columns is exactly one bar. The same holds at the other end in reverse. Taking the
+    outermost pair gives the full extent, and dividing by the bar count gives a pitch that
+    is fractional -- which matters, because rounding it accumulates: at 3.5 columns per
+    bar an integer pitch walks a whole bar off alignment by the far end of the pattern.
+
+    Raises DecodeError if no plausible geometry is found.
+    """
+    lowest, highest = min(columns), max(columns)
+    if highest - lowest < MIN_CONTRAST * 255:
+        raise DecodeError(
+            f"contrast too low to read: this row ranges {lowest} to {highest}. The "
+            f"pattern may not be on screen, or the display is off")
+    runs = bright_runs(columns, (lowest + highest) / 2.0)
+    if len(runs) < 2:
+        raise DecodeError(f"found {len(runs)} bright run(s); the pattern needs at least 2")
+    left = runs[0][0]
+    right = runs[-1][1]
+    pitch = (right - left) / TOTAL_BARS
+    if pitch < MIN_PITCH_COLUMNS:
+        raise DecodeError(
+            f"pattern spans only {right - left} columns, {pitch:.1f} per bar -- too "
+            f"small to read. Make the window bigger, or capture at a higher resolution")
+    return float(left), pitch
+
+
+def decode_columns(columns: list[int]) -> int:
+    """Recover the value from one row of column means.
+
+    The pattern is located rather than assumed, so the window it was drawn in can be any
+    size and anywhere on the display.
+
+    On how much this can be trusted, measured rather than asserted. Against corrupted
+    patterns (one to three bars flipped), 9.6% still decode to *something* with only the
+    checksum and the trailing pair; the bimodality check takes that to 6.7%. That floor is
+    the four-bit checksum's one-in-sixteen collision rate and no amount of care here will
+    beat it.
+
+    What makes the measurement sound is the layer above: a caller that checks the decoded
+    timestamp against the frame's own. A wrong decode lands anywhere in the 17-minute
+    window, so the chance it also looks like a plausible latency is about one in a
+    thousand -- taking the whole path to roughly 0.007% per frame, and a median over a
+    hundred samples absorbs what survives. tools/vcap-glass-to-glass does that check;
+    anything else reading this pattern must do it too.
+    """
+    if len(columns) < TOTAL_BARS * 2:
+        raise DecodeError(f"only {len(columns)} columns; too few to resolve "
+                          f"{TOTAL_BARS} bars")
+    lowest, highest = min(columns), max(columns)
+    if highest - lowest < MIN_CONTRAST * 255:
+        raise DecodeError(
+            f"contrast too low to read: this row ranges {lowest} to {highest}. The "
+            f"pattern may not be on screen, or the display is off")
+
+    runs = bright_runs(columns, (lowest + highest) / 2.0)
+    if len(runs) < 2:
+        raise DecodeError(f"found {len(runs)} bright run(s); the pattern needs at least 2")
+
+    # The pattern's extent is bounded by the FIRST and LAST bright runs -- no other pair
+    # can be right -- so only those two are considered. The remaining question is whether
+    # either edge has bled into something bright beside the window, and there are exactly
+    # four combinations of that.
+    #
+    # Searching more widely was tried and is actively harmful. Every pair of runs gives a
+    # candidate geometry, roughly a hundred of them, against six bits of validation
+    # (checksum plus the trailing pair) -- so wrong alignments passed routinely and
+    # returned confident nonsense. Measured: with the wide search, every single-bar
+    # corruption still "decoded", just to a different value.
+    #
+    # An outer edge is the outside of a run; an inner edge is the boundary that a run
+    # shares with the black bar next to it, which survives bleeding because bar 1 and the
+    # second-to-last bar are always black.
+    first, last = runs[0], runs[-1]
+    spans = (
+        (first[0], last[1], TOTAL_BARS, False),       # both edges clean
+        (first[1], last[0], TOTAL_BARS - 2, True),    # both bled
+        (first[0], last[0], TOTAL_BARS - 1, False),   # right edge bled
+        (first[1], last[1], TOTAL_BARS - 1, True),    # left edge bled
+    )
+
+    last_error = "no candidate geometry decoded"
+    widest = 0.0
+    for left_edge, right_edge, bars_between, left_is_inner in spans:
+        if bars_between <= 0 or right_edge <= left_edge:
+            continue
+        pitch = (right_edge - left_edge) / bars_between
+        if pitch < MIN_PITCH_COLUMNS:
+            # Report the widest attempt: a pattern that is merely small should say so,
+            # rather than quoting a near-zero pitch from a degenerate candidate.
+            widest = max(widest, pitch)
+            last_error = (
+                f"pattern spans about {widest * TOTAL_BARS:.0f} columns, "
+                f"{widest:.1f} per bar -- too small to read. Make the window bigger, "
+                f"or capture at a higher resolution")
+            continue
+        left = left_edge - pitch if left_is_inner else float(left_edge)
+        try:
+            return _decode_at(columns, left, pitch)
+        except DecodeError as exc:
+            last_error = str(exc)
+    raise DecodeError(last_error)
 
 
 def decode_dc_image(image) -> int:

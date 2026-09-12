@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the delay from a page drawing something to the frame arriving in the kernel.
+"""Measure the delay from drawing something to the frame arriving in the kernel.
 
 A frame's timestamp says when the USB frame reached the kernel. It does not say when the
 photons left the display, and the difference -- the source's output pipeline, the card's
@@ -11,137 +11,223 @@ tools/vcap-latency gives half the measurement and needs a control recording for 
 half. This gives the whole thing, using the one trick available when the machine driving
 the display is also the machine capturing it: put a clock on the screen and read it back.
 
-  1. Connect this machine's HDMI output to the capture card's input, so the card sees a
-     display this machine is driving.
-  2. Run this. Open the printed URL on that display and press F11 for fullscreen.
+  1. Connect this machine's HDMI output to the capture card's input.
+  2. Run this. A window of black and white bars opens on that display.
   3. It reports the round trip.
 
-The page draws a pattern of large black and white bars encoding the current time in
-milliseconds, on the server's CLOCK_MONOTONIC. Each captured frame is decoded back to that
-number and subtracted from the frame's own timestamp. Both ends are therefore on one clock
-on one machine, which is the same property the whole repo rests on -- see docs/timebase.md.
+The window draws the current time in milliseconds, on this process's own CLOCK_MONOTONIC,
+as a pattern of bars. Each captured frame is decoded back to that number and subtracted
+from the frame's own timestamp. One clock, one process, no synchronisation of any kind --
+which is the same property the whole repo rests on. See docs/timebase.md.
 
-WHAT THIS MEASURES, PRECISELY: the interval from a browser's requestAnimationFrame callback
-running to the kernel timestamping the frame that shows its output. That includes compositing,
-scanout, the cable, the card and the USB transfer.
+The pattern is self-locating, so the window does not have to be fullscreen, a particular
+size, or in a particular place. It only has to be visible on the display the card is
+capturing.
 
-WHAT IT DOES NOT: a browser cannot report when a frame actually reached the glass.
-requestAnimationFrame fires before compositing, so the true photon-to-kernel interval is
+WHAT THIS MEASURES: the interval from this program drawing a frame to the kernel
+timestamping the captured frame that shows it. That covers compositing, scanout, the
+cable, the card and the USB transfer.
+
+WHAT IT DOES NOT: a toolkit cannot report when a frame reached the glass. The draw call
+returns before the compositor has shown anything, so the true photon-to-kernel interval is
 SHORTER than this figure by up to one refresh period -- about 16 ms at 60 Hz. Treat the
-result as an upper bound, and subtract half a refresh period if you want a central estimate.
-It is reported here uncorrected, because a correction folded in silently cannot be undone
-by whoever reads the number later.
+result as an upper bound, and subtract half a refresh period for a central estimate. It is
+reported uncorrected on purpose: a correction folded in silently cannot be undone by
+whoever reads the number later.
 """
 from __future__ import annotations
 
 import argparse
-import http.server
 import json
-import socketserver
 import statistics
 import sys
 import threading
 import time
 
 import _bootstrap  # noqa: F401
-from vcap.barcode import (BAND_HEIGHT, BAND_TOP, BAR_WIDTH, DATA_BITS, WRAP_MS,
-                          DecodeError, SYNC_BARS, TOTAL_BARS, band_columns,
-                          decode_dc_image, reconstruct_ms, sample_bars)
+from vcap.barcode import (DecodeError, RENDER_MARGIN, TOTAL_BARS, WRAP_MS, band_columns,
+                          decode_dc_image, encode, locate, reconstruct_ms, sample_bars)
 from vcap.device import find_capture_card
 from vcap.jpeg_dc import JpegError, decode_dc
+from vcap.outputs import list_outputs, pick_external
 from vcap.source import NoSignal, StreamError, VideoSource
 
-PAGE = """<!doctype html>
-<title>vcap glass-to-glass</title>
-<style>
-  html, body { margin:0; padding:0; background:#000; overflow:hidden; height:100%%; }
-  #band { position:fixed; left:0; width:100%%; display:flex; }
-  #band div { height:100%%; }
-  #status { position:fixed; bottom:2vh; left:2vw; color:#666;
-            font:14px ui-monospace, monospace; }
-</style>
-<div id="band"></div>
-<div id="status">measuring clock offset...</div>
-<script>
-const BARS = %(total_bars)d, SYNC = %(sync_bars)d, DATA = %(data_bits)d;
-const BAR_W = %(bar_width)f, BAND_TOP = %(band_top)f, BAND_H = %(band_height)f;
+def load_tk():
+    """Import tkinter, or explain how to get it.
 
-const band = document.getElementById('band');
-band.style.top = (BAND_TOP * 100) + 'vh';
-band.style.height = (BAND_H * 100) + 'vh';
-const cells = [];
-for (let i = 0; i < BARS; i++) {
-  const d = document.createElement('div');
-  d.style.width = (BAR_W * 100) + 'vw';
-  band.appendChild(d);
-  cells.push(d);
-}
+    tkinter is in the standard library but Debian and Ubuntu package it separately, so on
+    a fresh capture box `import tkinter` fails even though nothing was left out of the
+    Python install. Worth saying outright rather than surfacing a bare ImportError.
+    """
+    try:
+        import tkinter
+        return tkinter
+    except ImportError:
+        print("this tool needs tkinter to draw the pattern.\n"
+              "  Debian/Ubuntu:  sudo apt install python3-tk\n"
+              "  Fedora:         sudo dnf install python3-tkinter\n"
+              "It is part of the standard library but packaged separately; nothing else "
+              "in this repo needs it.", file=sys.stderr)
+        return None
 
-function checksum(v) {
-  let c = 0;
-  for (let s = 0; s < DATA; s += 4) c ^= (v >>> s) & 0xF;
-  return c & 0xF;
-}
 
-// The browser's clock is not the server's. Sample the offset several times and keep the
-// exchange with the smallest round trip, which is the one least distorted by scheduling.
-// This is the only place the two clocks meet; everything after it is in server time.
-async function measureOffset(samples) {
-  let best = null;
-  for (let i = 0; i < samples; i++) {
-    const t0 = performance.now();
-    const r = await fetch('/time', {cache: 'no-store'});
-    const t1 = performance.now();
-    const serverMs = (await r.json()).monotonic_ns / 1e6;
-    const rtt = t1 - t0;
-    if (best === null || rtt < best.rtt) {
-      best = {rtt: rtt, offset: serverMs + rtt / 2 - t1};
-    }
-  }
-  return best;
-}
+class Measurement:
+    """State shared between the capture thread and the window."""
 
-let offset = 0, painted = 0;
-function draw(rafMs) {
-  // rafMs is the time this frame is INTENDED to be displayed, which is the best estimate
-  // a page has. It still precedes actual scanout; see the tool's docstring.
-  const serverMs = Math.round(rafMs + offset);
-  const value = ((serverMs %% %(wrap_ms)d) + %(wrap_ms)d) %% %(wrap_ms)d;
-  const bits = [1, 0];
-  for (let i = DATA - 1; i >= 0; i--) bits.push((value >>> i) & 1);
-  const c = checksum(value);
-  for (let i = 3; i >= 0; i--) bits.push((c >>> i) & 1);
-  for (let i = 0; i < BARS; i++) cells[i].style.background = bits[i] ? '#fff' : '#000';
-  painted++;
-  requestAnimationFrame(draw);
-}
+    def __init__(self, samples_wanted: int, timeout: float):
+        self.samples_wanted = samples_wanted
+        self.deadline = time.monotonic() + timeout
+        self.latencies: list[float] = []
+        self.frames_seen = 0
+        self.jpeg_failures = 0
+        self.decode_failures = 0
+        self.last_reason = "no frame decoded yet"
+        self.last_image = None
+        self.acquired = False
+        self.error: str | None = None
+        self.done = threading.Event()
+        self.lock = threading.Lock()
 
-measureOffset(20).then(best => {
-  offset = best.offset;
-  document.getElementById('status').textContent =
-    'clock offset locked, round trip ' + best.rtt.toFixed(2) + ' ms - press F11';
-  requestAnimationFrame(draw);
-});
-</script>
-"""
+    def enough(self) -> bool:
+        return len(self.latencies) >= self.samples_wanted
+
+
+def capture(device, width: int, height: int, fps: float, state: Measurement,
+            quiet: bool) -> None:
+    """Pull frames, decode the pattern, record the difference. Runs off the main thread.
+
+    tkinter insists on owning the main thread, and the capture loop must not be blocked by
+    it -- a window redraw stalling DQBUF would cost frames and, worse, would correlate the
+    thing being measured with the measuring.
+    """
+    last_status = 0.0
+    try:
+        with VideoSource(device, "MJPG", width, height, fps=fps) as source:
+            for frame in source.frames(timeout=3.0, patience=None):
+                if state.done.is_set() or time.monotonic() > state.deadline:
+                    break
+                if not frame.ok:
+                    continue
+                with state.lock:
+                    state.frames_seen += 1
+                try:
+                    image = decode_dc(frame.data)
+                except JpegError as exc:
+                    with state.lock:
+                        state.jpeg_failures += 1
+                        state.last_reason = f"JPEG: {exc}"
+                    continue
+                with state.lock:
+                    state.last_image = image
+                try:
+                    encoded = decode_dc_image(image)
+                except DecodeError as exc:
+                    with state.lock:
+                        state.decode_failures += 1
+                        state.last_reason = str(exc)
+                    now = time.monotonic()
+                    if not quiet and not state.acquired and now - last_status >= 1.0:
+                        line = (f"  waiting: {state.frames_seen} frames, none readable "
+                                f"-- {state.last_reason}")
+                        sys.stderr.write("\r" + line[:78].ljust(78))
+                        sys.stderr.flush()
+                        last_status = now
+                    continue
+
+                frame_ms = frame.ts_mono_ns / 1e6
+                drawn_ms = reconstruct_ms(encoded, frame_ms)
+                latency = frame_ms - drawn_ms
+                # Outside this range the pattern was misread in a way the checksum did not
+                # catch. It is the strongest filter available: a wrong decode lands
+                # anywhere in the 17-minute window, so almost none of them look plausible.
+                if not -50.0 < latency < 1000.0:
+                    with state.lock:
+                        state.decode_failures += 1
+                        state.last_reason = (f"decoded a timestamp implying "
+                                             f"{latency:.0f} ms, outside the plausible "
+                                             f"range")
+                    continue
+
+                with state.lock:
+                    state.latencies.append(latency)
+                    count = len(state.latencies)
+                    if not state.acquired:
+                        state.acquired = True
+                        if not quiet:
+                            sys.stderr.write("\r" + " " * 78 + "\r")
+                            print(f"  pattern acquired after {state.frames_seen} frames "
+                                  f"({latency:.1f} ms)", flush=True)
+                if not quiet and count % 20 == 0:
+                    sys.stderr.write(f"\r  {count}/{state.samples_wanted} samples   ")
+                    sys.stderr.flush()
+                if state.enough():
+                    break
+    except NoSignal as exc:
+        state.error = f"no signal: {exc}"
+    except StreamError as exc:
+        state.error = f"stream failed: {exc}"
+    finally:
+        state.done.set()
+
+
+def show_pattern(tk, geometry: str, state: Measurement, fullscreen: bool) -> None:
+    """Open the bar window and keep it drawing until the measurement finishes."""
+    root = tk.Tk()
+    root.title("vcap glass-to-glass")
+    root.configure(bg="#101010")
+    root.geometry(geometry)
+    if fullscreen:
+        root.attributes("-fullscreen", True)
+    canvas = tk.Canvas(root, highlightthickness=0, bd=0, bg="#101010")
+    canvas.pack(fill="both", expand=True)
+    rectangles = [canvas.create_rectangle(0, 0, 0, 0, width=0, fill="#000000")
+                  for _ in range(TOTAL_BARS)]
+    label = canvas.create_text(10, 10, anchor="nw", fill="#404040",
+                               text="vcap glass-to-glass")
+
+    def layout(_event=None):
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        left = w * RENDER_MARGIN
+        span = w * (1.0 - 2 * RENDER_MARGIN)
+        pitch = span / TOTAL_BARS
+        band = max(8, int(h * 0.25))
+        for index, rect in enumerate(rectangles):
+            x0 = left + index * pitch
+            canvas.coords(rect, x0, 0, x0 + pitch, band)
+        canvas.coords(label, 10, band + 10)
+
+    def tick():
+        if state.done.is_set():
+            root.destroy()
+            return
+        # The timestamp is taken immediately before the fills are set. Everything after
+        # this -- Tk's redraw, compositing, scanout -- is part of what is being measured.
+        value = (time.monotonic_ns() // 1_000_000) % WRAP_MS
+        for rect, bit in zip(rectangles, encode(value)):
+            canvas.itemconfig(rect, fill="#ffffff" if bit else "#000000")
+        root.after(8, tick)
+
+    root.bind("<Configure>", layout)
+    root.protocol("WM_DELETE_WINDOW", state.done.set)
+    root.after(0, lambda: (layout(), tick()))
+    root.mainloop()
 
 
 def ascii_preview(image, width: int = 72, height: int = 20) -> list[str]:
     """The captured frame as ASCII, so a failure can be looked at rather than guessed at.
 
-    This is how the DC decoder was validated in the first place -- a browser window
-    rendered as text is unmistakable -- and it answers the question a failed decode
-    actually raises: is the page even on screen?
+    This is how the DC decoder was validated in the first place -- a window rendered as
+    text is unmistakable -- and it answers the question a failed decode actually raises:
+    is the pattern even on screen?
     """
     ramp = " .:-=+*#%@"
     rows = []
     for y in range(height):
         sy = min(image.height - 1, y * image.height // height)
-        row = []
-        for x in range(width):
-            sx = min(image.width - 1, x * image.width // width)
-            row.append(ramp[min(9, image.at(sx, sy) * 10 // 256)])
-        rows.append("".join(row))
+        rows.append("".join(
+            ramp[min(9, image.at(min(image.width - 1, x * image.width // width), sy)
+                     * 10 // 256)] for x in range(width)))
     return rows
 
 
@@ -150,68 +236,48 @@ def describe_failure(image, reason: str) -> list[str]:
     lines = [f"  last decode failure: {reason}"]
     try:
         columns = band_columns(image)
-        bars = sample_bars(columns)
-        lines.append(f"  reference bars:      white {bars[0]:.0f}, black {bars[1]:.0f} "
-                     f"(need a gap of {0.15 * 255:.0f}+)")
-        levels = " ".join(f"{b:.0f}" for b in bars[SYNC_BARS:SYNC_BARS + 8])
-        lines.append(f"  first data bars:     {levels} ...")
-    except Exception as exc:                        # noqa: BLE001 - diagnostics only
-        lines.append(f"  could not sample the band: {exc}")
+        left, pitch = locate(columns)
+        bars = sample_bars(columns, left, pitch)
+        lines.append(f"  located pattern at:  column {left:.0f}, {pitch:.1f} per bar")
+        lines.append(f"  reference bars:      white {bars[0]:.0f}, black {bars[1]:.0f}")
+    except DecodeError as exc:
+        lines.append(f"  could not locate the pattern: {exc}")
     lines.append(f"  frame geometry:      {image.full_width}x{image.full_height} "
                  f"({image.width}x{image.height} blocks)")
     return lines
 
 
-class Handler(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def log_message(self, *args):
-        pass                              # the measurement owns the terminal
-
-    def _send(self, body: bytes, content_type: str) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        if self.path.startswith("/time"):
-            self._send(json.dumps({"monotonic_ns": time.monotonic_ns()}).encode(),
-                       "application/json")
-            return
-        if self.path in ("/", "/index.html"):
-            page = PAGE % {
-                "total_bars": TOTAL_BARS, "sync_bars": SYNC_BARS, "data_bits": DATA_BITS,
-                "bar_width": BAR_WIDTH, "band_top": BAND_TOP, "band_height": BAND_HEIGHT,
-                "wrap_ms": WRAP_MS,
-            }
-            self._send(page.encode(), "text/html; charset=utf-8")
-            return
-        self.send_error(404)
-
-
-class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-d", "--device", help="by-id path, /dev/videoN, or a name substring")
-    ap.add_argument("--size", default="1920x1080")
+    ap.add_argument("--size", default="1920x1080", help="capture geometry")
     ap.add_argument("--fps", type=float, default=60.0)
-    ap.add_argument("--port", type=int, default=8421)
-    ap.add_argument("--bind", default="127.0.0.1")
-    ap.add_argument("--samples", type=int, default=120,
-                    help="successful decodes to collect (default 120)")
-    ap.add_argument("--timeout", type=float, default=120.0,
-                    help="give up after this long (default 120 s)")
+    ap.add_argument("--output", help="monitor to draw on, by name (see --list-outputs)")
+    ap.add_argument("--geometry", help="place the window explicitly, as WxH+X+Y")
+    ap.add_argument("--fullscreen", action="store_true",
+                    help="fullscreen the window; not required, the pattern self-locates")
+    ap.add_argument("--list-outputs", action="store_true",
+                    help="show the monitors this can see, and exit")
+    ap.add_argument("--samples", type=int, default=120)
+    ap.add_argument("--timeout", type=float, default=120.0)
     ap.add_argument("--preview", action="store_true",
-                    help="print the captured frame as ASCII once, then continue")
+                    help="print the captured frame as ASCII once acquired")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+
+    outputs = list_outputs()
+    if args.list_outputs:
+        if not outputs:
+            print("could not read the monitor layout (no xrandr, or no X/XWayland). "
+                  "Use --geometry to place the window by hand.", file=sys.stderr)
+            return 1
+        for output in outputs:
+            print(f"  {output}")
+        return 0
+
+    tk = load_tk()
+    if tk is None:
+        return 2
 
     width, _, height = args.size.partition("x")
     try:
@@ -220,127 +286,64 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    try:
-        server = Server((args.bind, args.port), Handler)
-    except OSError as exc:
-        # Running this twice, or leaving a previous run alive, is an ordinary mistake and
-        # deserves a sentence rather than a traceback.
-        print(f"cannot serve on {args.bind}:{args.port}: {exc}", file=sys.stderr)
-        print("Another copy may still be running. Use --port, or stop it.",
-              file=sys.stderr)
-        return 2
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    if args.geometry:
+        geometry = args.geometry
+        where = f"at {geometry}"
+    else:
+        target = pick_external(outputs, args.output)
+        if target is None:
+            # Guessing between monitors would put the pattern on the wrong one and look
+            # like a decode failure, so say what was found and let the operator choose.
+            found = ", ".join(o.name for o in outputs) or "none"
+            print(f"cannot tell which display feeds the capture card (found: {found}).\n"
+                  f"Pass --output NAME or --geometry WxH+X+Y. --list-outputs shows them.",
+                  file=sys.stderr)
+            return 2
+        geometry = target.geometry
+        where = f"on {target.name} ({geometry})"
 
     if not args.json:
-        print(f"\n  1. open  http://{args.bind}:{args.port}/  on the display this "
-              f"machine feeds to the capture card")
-        print("  2. press F11 for fullscreen")
-        print(f"  3. waiting for {args.samples} readable frames "
-              f"(up to {args.timeout:g} s)\n", flush=True)
+        print(f"\n  capturing from {device.path}")
+        print(f"  drawing the pattern {where}")
+        print(f"  the window need not be fullscreen -- the pattern locates itself\n",
+              flush=True)
 
-    latencies: list[float] = []
-    decode_failures = 0
-    jpeg_failures = 0
-    frames_seen = 0
-    first_seen = False
-    last_reason = "no frame decoded yet"
-    last_image = None
-    deadline = time.monotonic() + args.timeout
-    last_status = 0.0
-    exit_code = 0
-
+    state = Measurement(args.samples, args.timeout)
+    worker = threading.Thread(target=capture,
+                              args=(device, int(width), int(height), args.fps, state,
+                                    args.json),
+                              daemon=True)
+    worker.start()
     try:
-        with VideoSource(device, "MJPG", int(width), int(height), fps=args.fps) as src:
-            for frame in src.frames(timeout=3.0, patience=None):
-                if time.monotonic() > deadline:
-                    break
-                if not frame.ok:
-                    continue
-                frames_seen += 1
-                try:
-                    image = decode_dc(frame.data)
-                except JpegError as exc:
-                    jpeg_failures += 1
-                    last_reason = f"JPEG: {exc}"
-                    continue
-                last_image = image
-                try:
-                    encoded = decode_dc_image(image)
-                except DecodeError as exc:
-                    decode_failures += 1
-                    # The message names the cause -- low contrast with the levels it
-                    # saw, or a checksum mismatch. Discarding it, as an earlier version
-                    # did, left "could not read the pattern" as the only output.
-                    last_reason = str(exc)
-                    now = time.monotonic()
-                    if not args.json and not first_seen and now - last_status >= 1.0:
-                        # Kept inside 78 columns: a status line that wraps cannot be
-                        # overwritten by the carriage return, and leaves a smear of
-                        # half-lines behind it.
-                        line = (f"  waiting: {frames_seen} frames, none readable "
-                                f"-- {last_reason}")
-                        sys.stderr.write("\r" + line[:78].ljust(78))
-                        sys.stderr.flush()
-                        last_status = now
-                    continue
-
-                frame_ms = frame.ts_mono_ns / 1e6
-                painted_ms = reconstruct_ms(encoded, frame_ms)
-                latency = frame_ms - painted_ms
-                # A negative or absurd value means the pattern was misread in a way the
-                # checksum did not catch, or the page had not locked its clock offset yet.
-                if not -50.0 < latency < 1000.0:
-                    decode_failures += 1
-                    last_reason = (f"decoded a timestamp implying {latency:.0f} ms, "
-                                   f"outside the plausible range")
-                    continue
-                latencies.append(latency)
-                if not first_seen and not args.json:
-                    sys.stderr.write("\r" + " " * 78 + "\r")
-                    print(f"  pattern acquired after {frames_seen} frames "
-                          f"({latency:.1f} ms)\n", flush=True)
-                    if args.preview:
-                        for line in ascii_preview(image):
-                            print("    " + line)
-                        print("", flush=True)
-                    first_seen = True
-                if len(latencies) >= args.samples:
-                    break
-                if not args.json and len(latencies) % 20 == 0:
-                    sys.stderr.write(f"\r  {len(latencies)}/{args.samples} samples   ")
-                    sys.stderr.flush()
-    except NoSignal as exc:
-        print(f"\nno signal: {exc}", file=sys.stderr)
-        exit_code = 1
-    except StreamError as exc:
-        print(f"\nstream failed: {exc}", file=sys.stderr)
-        exit_code = 1
+        show_pattern(tk, geometry, state, args.fullscreen)
     except KeyboardInterrupt:
-        pass
-    finally:
-        server.shutdown()
+        state.done.set()
+    worker.join(timeout=5.0)
 
     if not args.json:
         sys.stderr.write("\n")
 
-    if not latencies:
-        print(f"no readable frames: {frames_seen} captured, {jpeg_failures} failed to "
-              f"JPEG-decode, {decode_failures} had no readable pattern.\n",
-              file=sys.stderr)
-        if last_image is not None:
-            for line in describe_failure(last_image, last_reason):
-                print(line, file=sys.stderr)
-            print("\n  what the card is seeing:\n", file=sys.stderr)
-            for line in ascii_preview(last_image):
-                print("    " + line, file=sys.stderr)
-            print("", file=sys.stderr)
-        print("  The bar pattern is a band across the TOP of the page, so:\n"
-              "    - the page must be fullscreen (F11); browser chrome covers the band\n"
-              "    - the display must be the one feeding the capture card\n"
-              "    - --size must match what the card is actually sending "
-              "(check vcap-probe)", file=sys.stderr)
+    if state.error:
+        print(state.error, file=sys.stderr)
         return 1
 
+    if not state.latencies:
+        print(f"no readable frames: {state.frames_seen} captured, "
+              f"{state.jpeg_failures} failed to JPEG-decode, {state.decode_failures} "
+              f"had no readable pattern.\n", file=sys.stderr)
+        if state.last_image is not None:
+            for line in describe_failure(state.last_image, state.last_reason):
+                print(line, file=sys.stderr)
+            print("\n  what the card is seeing:\n", file=sys.stderr)
+            for line in ascii_preview(state.last_image):
+                print("    " + line, file=sys.stderr)
+            print("", file=sys.stderr)
+        print("  Check that the window opened on the display feeding the card, that it "
+              "is\n  not covered, and that --size matches what the card sends "
+              "(vcap-probe).", file=sys.stderr)
+        return 1
+
+    latencies = state.latencies
     result = {
         "samples": len(latencies),
         "median_ms": round(statistics.median(latencies), 2),
@@ -348,16 +351,21 @@ def main() -> int:
         "min_ms": round(min(latencies), 2),
         "max_ms": round(max(latencies), 2),
         "stdev_ms": round(statistics.stdev(latencies), 2) if len(latencies) > 2 else 0.0,
-        "decode_failures": decode_failures,
-        "jpeg_failures": jpeg_failures,
+        "frames_seen": state.frames_seen,
+        "decode_failures": state.decode_failures,
+        "jpeg_failures": state.jpeg_failures,
         "capture_offset_ns": int(statistics.median(latencies) * 1e6),
-        "method": "glass-to-glass, browser rAF to kernel frame timestamp, "
+        "method": "glass-to-glass, tk draw call to kernel frame timestamp, "
                   "uncorrected for pre-scanout bias",
     }
     if args.json:
         print(json.dumps(result, indent=2))
-        return exit_code
+        return 0
 
+    if args.preview and state.last_image is not None:
+        for line in ascii_preview(state.last_image):
+            print("    " + line)
+        print()
     print(f"  samples          {result['samples']}")
     print(f"  median           {result['median_ms']:.2f} ms")
     print(f"  mean             {result['mean_ms']:.2f} ms")
@@ -366,15 +374,15 @@ def main() -> int:
     print(f"  unreadable       {result['decode_failures']} decodes, "
           f"{result['jpeg_failures']} frames")
     print()
-    print(f"  This is an UPPER BOUND. requestAnimationFrame fires before compositing, so")
-    print(f"  true photon-to-kernel latency is shorter by up to one refresh period")
-    print(f"  (~{1000 / 60:.0f} ms at 60 Hz). Reported uncorrected on purpose.")
+    print("  This is an UPPER BOUND. The draw call returns before the compositor has")
+    print("  shown anything, so true photon-to-kernel latency is shorter by up to one")
+    print(f"  refresh period (~{1000 / 60:.0f} ms at 60 Hz). Reported uncorrected.")
     print()
-    print(f"  Record it in a session manifest as:")
+    print("  Record it in a session manifest as:")
     print(f'    timebase.capture_offset_ns = {result["capture_offset_ns"]}')
     print(f'    timebase.capture_offset_method = "{result["method"]}"')
-    print(f"  Do not fold it into frame timestamps -- see docs/timebase.md.")
-    return exit_code
+    print("  Do not fold it into frame timestamps -- see docs/timebase.md.")
+    return 0
 
 
 if __name__ == "__main__":
