@@ -64,8 +64,9 @@ and `ring.LatestFrame` — rather than one with a mode flag.
 
 Developed against a **MacroSilicon MS2130** (`345f:2131`), sold as a "Rybozen 4K HDMI to
 USB 3.0 capture card" and under many other names. It is UVC class, so `uvcvideo` drives it
-with nothing to install. Measured on it: **1080p60 MJPEG, 60.04 fps sustained, no dropped
-frames.**
+with nothing to install. Measured on it, on live 1080p60 video: **59.76 fps sustained, 901
+frames to disk with no dropped frames** — at **14.5–19 MB/s, or 52–69 GB/hour**, which is
+the number to plan storage against.
 
 Read [docs/hardware.md](docs/hardware.md) before a collection run. The traps that cost the
 most:
@@ -73,7 +74,7 @@ most:
 | Trap | Consequence |
 |---|---|
 | **The card emits frames with nothing connected to its HDMI input** | Every software signal looks healthy while you record 60 fps of a placeholder image. No counter in this repo can detect it — look at the picture first. |
-| The first frame of nearly every stream is an undecodable fragment | It is the *back half* of a frame in flight when `STREAMON` landed — no header, so it cannot be decoded. Flagged, not hidden. Filter on `Recording.flagged()`. |
+| The first frame of nearly every stream is an undecodable fragment | It is the *back half* of a frame in flight when `STREAMON` landed — no header, so it cannot be decoded. Happens with a live source too. Flagged, not hidden. Filter on `Recording.flagged()`. |
 | Descriptors advertise modes the card cannot sustain | It claims every geometry in both MJPEG and YUYV at identical rates. Measure with `vcap-probe`; never trust the list. |
 | `/dev/videoN` numbering moves, and two nodes appear per device | One is metadata-only. Always go through `/dev/v4l/by-id/`; `find_capture_card()` does. |
 | A source changing resolution changes the image mid-stream | The V4L2 format does not change with it. `vcap-verify` checks JPEG headers to catch it. |

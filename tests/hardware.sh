@@ -87,9 +87,14 @@ fi
 # forty million -- so zero means the firmware changed and the docs are stale, which is
 # worth failing on.
 #
-# Where a fragment is found its shape is checked, because that is what identifies the
-# cause: missing start-of-image, valid end-of-image. A fragment missing its *tail* would
-# be a different fault -- signal loss rather than stream-start alignment.
+# Where a fragment is found, the invariant checked is that it is missing its *head*,
+# because that is what identifies stream-start alignment as the cause. Requiring a valid
+# end-of-image marker as well was too strict and made this flaky: over 40 starts, 95% were
+# headless with a valid EOI but 2.5% were missing both ends -- a few-KB sliver where the
+# buffer was also cut short. Both are the same phenomenon.
+#
+# A fragment that *has* a head and is missing its tail would be a genuinely different
+# fault -- signal loss mid-frame rather than stream-start alignment -- so that one fails.
 shape="$(python3 - <<'FIRSTFRAME' 2>&1
 import os, sys
 sys.path.insert(0, os.getcwd())
@@ -104,9 +109,9 @@ for _ in range(5):
     if f.ok:
         continue
     fragments += 1
-    headless = f.data[:2] != b"\xff\xd8"
-    ends_clean = f.data[-2:] == b"\xff\xd9"
-    if not (headless and ends_clean):
+    if f.data[:2] == b"\xff\xd8":
+        # Has a start-of-image, so the stream did not begin mid-frame. Something else
+        # damaged this frame.
         wrong_shape += 1
 print(fragments, wrong_shape)
 FIRSTFRAME
@@ -118,9 +123,9 @@ if [[ "${frags:-x}" =~ ^[0-9]+$ ]]; then
             "not a regression in this code -- check whether the firmware changed"
     elif [[ "${wrong:-0}" -gt 0 ]]; then
         bad "a first-frame fragment had the wrong shape" \
-            "$wrong of $frags were not headless-with-valid-EOI: that is signal loss, not stream-start alignment"
+            "$wrong of $frags had a start-of-image marker: that is damage mid-frame, not stream-start alignment"
     else
-        ok "first frame is a headless fragment on $frags of 5 starts, as documented"
+        ok "first frame is a head-missing fragment on $frags of 5 starts, as documented"
     fi
 else
     bad "could not probe the first frame" "$shape"

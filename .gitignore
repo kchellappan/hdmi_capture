@@ -3,7 +3,7 @@ __pycache__/
 .cache/
 
 # Recordings: these are training data, often many gigabytes, and are outputs rather than
-# sources. At 1080p60 a single session is ~8.8 GB/hour.
+# sources. At 1080p60 on live content a session is ~52 GB/hour.
 data/
 *.mjpg
 *.idx

@@ -13,11 +13,27 @@ Bus 004 Device 002: ID 345f:2131 MACROSILICON USB3.0 Video
 
 ## What it actually delivers
 
-Genuine 1080p60 in MJPEG, sustained, with no dropped frames on an idle machine:
+Genuine 1080p60 in MJPEG, sustained, with no dropped frames on an idle machine. Measured
+both with nothing connected and with live video from a laptop's HDMI output:
 
 ```
-MJPG 1920x1080 @ 60 -> 60.04 fps   41 KB/frame   dropped=0
+no input:     MJPG 1920x1080 @ 60 -> 60.04 fps    41 KB/frame   dropped=0
+live video:   MJPG 1920x1080 @ 60 -> 59.76 fps   236 KB/frame   dropped=0
+              901 frames recorded to disk over 15 s, writer queue never exceeded 0
 ```
+
+The frame size difference matters for planning: live content is about six times the data,
+**14.5-19 MB/s or 52-69 GB/hour**. See [formats.md](formats.md#sizing).
+
+It is tempting to read that gap the other way and treat a 40 KB frame as a no-signal
+detector. Do not: genuinely dark or static content compresses small too, so it is a hint
+worth eyeballing and not a fact worth acting on. Nothing in this repo reports it as health.
+
+Buffer depth made no difference to drops (tested at 4, 8 and 16 buffers). Doing per-frame
+work inside the capture loop did: a measurement loop that parsed JPEG headers and updated a
+set on every frame lost 2 frames in 600 and saw a 50 ms stall, while the same capture
+recording to disk through `AsyncWriter` lost none in 901. That is the whole argument for
+the writer thread.
 
 The link negotiates SuperSpeed (`/sys/bus/usb/devices/*/speed` reads `5000`), so the
 "USB 3.0" on the box is real. This matters because the **MS2109** -- the older, USB 2.0
@@ -59,8 +75,8 @@ loop-out. Do that before a session, not after.
 
 ## The first frame after STREAMON is a fragment
 
-Observed on 33 of 34 stream starts. The first buffer holds a **partial frame missing its
-beginning**:
+Observed on 39 of 40 stream starts with live 1080p60 video on the input. The first buffer
+holds a **partial frame missing its beginning**:
 
 ```
 frame 0:  21992 bytes  head=2800a2800a28  tail=803fffd9
@@ -82,13 +98,25 @@ does not set them in a way that permits it.
 
 Two consequences worth being clear about:
 
-- **It is not specific to having no HDMI input.** It is about the card already
-  transmitting when the stream starts, so expect it with a live source too. The
-  measurements above were taken with nothing connected, which is the one thing they do
-  not tell you -- but the mechanism does not depend on the input.
-- **It is not strictly guaranteed.** One clean start was observed out of 34, where the
-  payload boundary happened to line up. Code should treat a fragmented first frame as
-  very likely, never as certain, and equally should not assume it.
+- **It is not specific to having no HDMI input.** Confirmed on 5 of 5 stream starts with
+  live 1080p60 video on the input, each one headless with a valid end-of-image marker,
+  exactly as with no input. The fragments are correspondingly larger there -- a partial
+  frame of real content, 36-277 KB -- which is another reason not to infer anything from
+  payload size alone.
+- **It is not strictly guaranteed, and the fragment has two shapes.** Over 40 starts with
+  a live source:
+
+  | first frame | share |
+  |---|---|
+  | headless, valid end-of-image | 95% |
+  | missing both ends -- a few-KB sliver | 2.5% |
+  | clean, where the payload boundary lined up | 2.5% |
+
+  The invariant worth relying on is that the fragment is **missing its head**, which holds
+  for both broken shapes. Requiring a valid end-of-image marker as well is too strict:
+  `tests/hardware.sh` did that at first and failed roughly one run in eight. A fragment
+  that *has* a head and lacks its tail would be a different fault -- damage mid-frame
+  rather than stream-start alignment -- and the test still fails on that.
 
 Because the fragment is missing its header it cannot be decoded at all, which is a
 stronger statement than "it looks odd". This repo still writes it, flagged with

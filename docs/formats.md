@@ -106,14 +106,31 @@ Rollover defaults to 2 GB. It exists because a single file for a long session ca
 moved off the machine until the session ends, is refused outright by filesystems with a
 4 GB limit, and loses the whole recording to one corrupt region.
 
-At 1080p60 MJPEG, ~40 KB a frame, a segment is about fourteen minutes. `--segment-mb 0`
-disables rollover.
+At 1080p60 MJPEG on live content, ~236 KB a frame, a 2 GB segment is about two and a half
+minutes. `--segment-mb 0` disables rollover. Raise `--segment-mb` if that many files is
+inconvenient; the reasons for a bound are a filesystem's 4 GB limit and how much one
+corrupt region costs, not the count.
 
 ## Sizing
 
-Roughly, from measurement: **2.5 MB/s, 8.8 GB/hour** at 1080p60 with this card's
-compression on static content. Busy video compresses worse; MJPEG is intra-only, so the
-figure scales with image complexity rather than with motion.
+Measured at 1080p60 on live video from a laptop's HDMI output:
+
+| | frame | rate | per hour |
+|---|---|---|---|
+| Live video content | 210-345 KB | **14.5-19 MB/s** | **52-69 GB** |
+| The no-signal placeholder | ~40 KB | 2.5 MB/s | 8.8 GB |
+
+**Plan against the first row.** The placeholder figure is what this card produces with
+nothing connected to its HDMI input, it is about six times smaller, and an earlier version
+of this document quoted it as though it were a capture rate. It is not: it is the cost of
+recording a static blue screen.
+
+MJPEG is intra-only, so the rate scales with how much detail is in each frame rather than
+with motion. Expect the high end of that range for anything busy, and note that a policy
+collection run of a hundred two-minute episodes is on the order of 170 GB.
+
+A 2 GB segment is therefore about **two and a half minutes**, not the fourteen this
+document previously claimed.
 
 If that is too much to keep, `vcap/export/to_mp4.py` re-encodes to H.264 at a large
 saving. Archive with it; do not train from it.
