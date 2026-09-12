@@ -92,6 +92,20 @@ Do not re-derive these:
 | A container loses the exact per-frame timestamp | `docs/formats.md`, and the header of `vcap_py/vcap/export/to_mp4.py` |
 | `at()` without a tolerance always returns a frame | `vcap_py/vcap/reader.py`, `docs/timebase.md` |
 
+## What CI does and does not cover
+
+Measured, not assumed -- the workflow was run and its logs read.
+
+Covered on every push: the Python suite, the stdlib-only check, the ioctl ABI constants,
+the C++ client built both with cmake and through the direct-g++ fallback, and the
+cross-language round trip where C++ writes a recording and Python reads it back.
+
+**Not covered: the capture loop.** `tests/test_vivid.py` exists to exercise the real
+ioctl, mmap and DQBUF path against the kernel's virtual video driver, but GitHub's runners
+ship no `vivid` module, so that job skips every time. A green tick on it means "did not
+run". The capture loop is only ever exercised by hand, against the card, via
+`tests/hardware.sh` and `vcap_cpp/tests/roundtrip.sh`.
+
 ## Known unfinished
 
 - **One card, one machine.** A second identical unit is untested and may collide on
