@@ -134,22 +134,38 @@ to provide one.
 
 ## What is in here
 
+```
+vcap_py/vcap/    Python: capture, storage, read-back        import vcap
+vcap_cpp/        C++: capture only                          #include "vcap/source.hpp"
+tools/           command line tools (Python)
+docs/            the reasoning; read hardware.md before a run
+tests/           hardware-free suite, plus hardware.sh
+scripts/         optional setup: udev rule, device access
+```
+
+The directories say which language; the name you import or include is `vcap` in both.
+
 | | |
 |---|---|
-| `vcap/v4l2.py` | The V4L2 ioctl interface in `ctypes`. Structure sizes are ABI; the padding is load-bearing. |
-| `vcap/device.py` | Enumeration and stable identity through `by-id`. |
-| `vcap/probe.py` | Capability measurement, because the descriptors overstate. |
-| `vcap/source.py` | The capture loop. `mmap`'d buffers in, timestamped frames out. Drops nothing, converts nothing. |
-| `vcap/writer.py` | Segmented `.mjpg`/`.idx` writing on its own thread. Raises rather than dropping. |
-| `vcap/index.py` | Fixed-size records; random access and timestamp search. |
-| `vcap/reader.py` | A recording opened for random access, segments presented as one sequence. |
-| `vcap/ring.py` | Latest-frame-wins, for live consumers. |
-| `vcap/session.py` | Source, writer and manifest wired together. |
-| `vcap/decode.py` | The dependency boundary, and why it is there. |
-| `vcap/export/` | MP4/MKV remux and frame extraction. For humans, not for training. |
+| `vcap_py/vcap/v4l2.py` | The V4L2 ioctl interface in `ctypes`. Structure sizes are ABI; the padding is load-bearing. |
+| `vcap_py/vcap/device.py` | Enumeration and stable identity through `by-id`. |
+| `vcap_py/vcap/probe.py` | Capability measurement, because the descriptors overstate. |
+| `vcap_py/vcap/source.py` | The capture loop. `mmap`'d buffers in, timestamped frames out. Drops nothing, converts nothing. |
+| `vcap_py/vcap/writer.py` | Segmented `.mjpg`/`.idx` writing on its own thread. Raises rather than dropping. |
+| `vcap_py/vcap/index.py` | Fixed-size records; random access and timestamp search. |
+| `vcap_py/vcap/reader.py` | A recording opened for random access, segments presented as one sequence. |
+| `vcap_py/vcap/ring.py` | Latest-frame-wins, for live consumers. |
+| `vcap_py/vcap/session.py` | Source, writer and manifest wired together. |
+| `vcap_py/vcap/decode.py` | The dependency boundary, and why it is there. |
+| `vcap_py/vcap/export/` | MP4/MKV remux and frame extraction. For humans, not for training. |
 
 Tools: `vcap-list`, `vcap-probe`, `vcap-record`, `vcap-verify`, `vcap-view`,
 `vcap-latency`. All run from a checkout with no install step.
+
+`clients/cpp/` is a C++ capture client that writes the same format — for a recorder with no
+Python in the loop. It captures only; anything it writes is read back with the Python
+reader above, which is what lets it stay dependency-free. See
+[clients/cpp/README.md](clients/cpp/README.md).
 
 ## Dependencies
 
@@ -159,7 +175,7 @@ V4L2 is `ioctl` and `mmap`, and Python already has both, so there was nothing to
 the first place. The useful consequence is that a repo submoduling this one can record data
 on a fresh machine with no venv, no pip and no build step.
 
-Decoding is where that stops being true, and `vcap/decode.py` says so rather than
+Decoding is where that stops being true, and `vcap_py/vcap/decode.py` says so rather than
 pretending otherwise. Turning a JPEG into an array is work that numpy, Pillow and OpenCV
 already do better than pure Python could, and a machine that trains a policy has them
 already. So the boundary is explicit and narrow:
@@ -217,7 +233,7 @@ Not exercised on hardware:
 - **Audio**, which this repo does not touch at all.
 - **The MS2109 variant**, and non-x86-64 hosts.
 
-`vcap/export/to_lerobot.py` is named in the design and not written. The display-to-USB
+`vcap_py/vcap/export/to_lerobot.py` is named in the design and not written. The display-to-USB
 latency offset (`timebase.capture_offset_ns`) is never populated automatically and needs a
 control recording to measure — see [docs/timebase.md](docs/timebase.md).
 

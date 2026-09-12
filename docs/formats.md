@@ -24,7 +24,7 @@ the real values -- at which point the container is doing nothing the index does 
 timestamp. With fixed-size index records, the first is one seek and the second a binary
 search over a memory-mapped file. Getting either out of an MP4 means a demuxer.
 
-The exports in `vcap/export/` produce MP4 or MKV for watching. Do not train from them: the
+The exports in `vcap_py/vcap/export/` produce MP4 or MKV for watching. Do not train from them: the
 timestamps in them are approximations of the ones in the index.
 
 ## The stream file
@@ -153,5 +153,5 @@ collection run of a hundred two-minute episodes is on the order of 170 GB.
 A 2 GB segment is therefore about **two and a half minutes**, not the fourteen this
 document previously claimed.
 
-If that is too much to keep, `vcap/export/to_mp4.py` re-encodes to H.264 at a large
+If that is too much to keep, `vcap_py/vcap/export/to_mp4.py` re-encodes to H.264 at a large
 saving. Archive with it; do not train from it.

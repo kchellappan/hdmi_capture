@@ -29,9 +29,9 @@ SKIP_DIRS = {".git", "__pycache__", "build", "data"}
 # The declared dependency boundary. These may import third-party packages; see
 # vcap/decode.py for the reasoning. Paths are relative to the repo root.
 ALLOWED = {
-    "vcap/decode.py",
-    "vcap/export/to_mp4.py",
-    "vcap/export/to_frames.py",
+    "vcap_py/vcap/decode.py",
+    "vcap_py/vcap/export/to_mp4.py",
+    "vcap_py/vcap/export/to_frames.py",
 }
 
 
