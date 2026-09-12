@@ -271,8 +271,12 @@ class VideoSource:
                     self.driver_dropped += dropped
             self._last_seq = buf.sequence
 
-            # Only meaningful for MJPEG; for raw formats the payload has no structure to
-            # check and a short buffer is the only available signal.
+            # Only meaningful for MJPEG; for raw formats the payload has no structure
+            # to check, and the driver pads a short frame to sizeimage rather than
+            # reporting it, so there is no signal to test.
+            #
+            # Expect this to fire on the first frame of nearly every stream: the card
+            # transmits continuously and STREAMON lands mid-frame. See docs/hardware.md.
             if self.negotiated and self.negotiated.pixelformat == "MJPG":
                 if not looks_like_jpeg(data):
                     flags |= FLAG_CORRUPT

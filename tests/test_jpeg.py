@@ -38,6 +38,16 @@ def main() -> int:
     check("complete JPEG is complete", looks_like_jpeg(make_jpeg(64, 48)), True)
     check("frame without EOI is incomplete",
           looks_like_jpeg(make_jpeg(64, 48, complete=False)), False)
+    # The common case by far: the stream-start fragment, which has a perfectly valid EOI
+    # and is missing its head. A check that tested only the tail -- the intuitive choice,
+    # since signal loss costs the tail -- would pass this and let an undecodable frame
+    # into a dataset unflagged.
+    headless = make_jpeg(64, 48, headless=True)
+    check("a headless fragment is not a whole JPEG", looks_like_jpeg(headless), False)
+    check("and it does end with a valid EOI",
+          headless[-2:], b"\xff\xd9")
+    check("a headless fragment has no readable geometry",
+          jpeg_dimensions(headless), None)
     check("empty is not a JPEG", looks_like_jpeg(b""), False)
     check("SOI alone is not a JPEG", looks_like_jpeg(b"\xff\xd8"), False)
 

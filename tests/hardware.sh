@@ -78,22 +78,52 @@ else
     bad "driver dropped frames on an idle machine" "$dropped frames"
 fi
 
-# ------------------------------------------------- the first frame is reliably partial
-# Documented in docs/hardware.md and relied on by vcap-view, which skips it. If the
-# firmware ever stops doing this the flag becomes dead weight and the docs become wrong.
-first_flagged="$(python3 - <<PY 2>/dev/null
+# ----------------------------------------------- the first frame is usually a fragment
+# Documented in docs/hardware.md and relied on by vcap-view, which skips flagged frames.
+#
+# Five stream starts rather than one, and a threshold rather than an assertion on every
+# start: the fragment was observed on 33 of 34 starts, not all of them, so requiring it
+# every time is a flaky test. At that rate, seeing none in five starts is around one in
+# forty million -- so zero means the firmware changed and the docs are stale, which is
+# worth failing on.
+#
+# Where a fragment is found its shape is checked, because that is what identifies the
+# cause: missing start-of-image, valid end-of-image. A fragment missing its *tail* would
+# be a different fault -- signal loss rather than stream-start alignment.
+shape="$(python3 - <<'FIRSTFRAME' 2>&1
 import os, sys
 sys.path.insert(0, os.getcwd())
-from vcap.reader import Recording
-with Recording("$TMP/s") as r:
-    print(1 if r.entry(0).flags else 0)
-PY
+from vcap.device import find_capture_card
+from vcap.source import VideoSource
+d = find_capture_card(os.environ.get("VCAP_DEVICE", "MACROSILICON"))
+fragments = 0
+wrong_shape = 0
+for _ in range(5):
+    with VideoSource(d, "MJPG", 1920, 1080, fps=60) as s:
+        f = s.read(timeout=3.0)
+    if f.ok:
+        continue
+    fragments += 1
+    headless = f.data[:2] != b"\xff\xd8"
+    ends_clean = f.data[-2:] == b"\xff\xd9"
+    if not (headless and ends_clean):
+        wrong_shape += 1
+print(fragments, wrong_shape)
+FIRSTFRAME
 )"
-if [[ "${first_flagged:-0}" -eq 1 ]]; then
-    ok "the first frame after STREAMON is flagged, as documented"
+read -r frags wrong <<< "$shape"
+if [[ "${frags:-x}" =~ ^[0-9]+$ ]]; then
+    if [[ "$frags" -eq 0 ]]; then
+        bad "no fragmented first frame in 5 starts; docs/hardware.md says ~97%" \
+            "not a regression in this code -- check whether the firmware changed"
+    elif [[ "${wrong:-0}" -gt 0 ]]; then
+        bad "a first-frame fragment had the wrong shape" \
+            "$wrong of $frags were not headless-with-valid-EOI: that is signal loss, not stream-start alignment"
+    else
+        ok "first frame is a headless fragment on $frags of 5 starts, as documented"
+    fi
 else
-    bad "the first frame was clean; docs/hardware.md says it never is" \
-        "not a regression in this code -- check whether the firmware changed"
+    bad "could not probe the first frame" "$shape"
 fi
 
 # --------------------------------------------------- frames arrive with no HDMI input

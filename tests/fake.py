@@ -20,13 +20,19 @@ from vcap.frame import Frame  # noqa: E402
 
 
 def make_jpeg(width: int = 64, height: int = 48, payload: int = 128,
-              *, complete: bool = True) -> bytes:
+              *, complete: bool = True, headless: bool = False) -> bytes:
     """A structurally valid JPEG: SOI, a baseline SOF0, filler, and optionally EOI.
 
     Not decodable -- there is no Huffman table or scan data -- but it has exactly the
-    structure the marker walker in vcap.frame reads, which is what is under test. Passing
-    complete=False truncates before the end-of-image marker, which is how a real frame
-    from this card presents when the source cuts out mid-frame.
+    structure the marker walker in vcap.frame reads, which is what is under test.
+
+    The two ways a real frame arrives broken are modelled separately, because they have
+    different causes and only one of them is common:
+
+    * headless=True drops everything before the scan data, leaving a valid EOI. This is
+      the stream-start fragment: the card transmits continuously and STREAMON begins
+      assembling mid-frame. Measured at 33 of 34 stream starts.
+    * complete=False drops the trailing EOI. This is a source cutting out mid-frame.
     """
     out = bytearray(b"\xff\xd8")
     # SOF0: length 17, 8-bit precision, height, width, 3 components.
@@ -42,6 +48,10 @@ def make_jpeg(width: int = 64, height: int = 48, payload: int = 128,
         out += b"\xff\xfe" + (len(body) + 2).to_bytes(2, "big") + body
     if complete:
         out += b"\xff\xd9"
+    if headless:
+        # Keep only the back portion, as the driver does when it starts mid-frame: no
+        # SOI, no SOF, but the frame's own valid ending.
+        return bytes(out[len(out) // 2:])
     return bytes(out)
 
 
@@ -50,9 +60,10 @@ def frames(count: int, *, start_ns: int = 1_000_000_000, period_ns: int = 16_666
            gap_at: int | None = None, gap_frames: int = 3):
     """A sequence of Frames resembling what VideoSource yields.
 
-    `flag_first` reproduces this card's behaviour of emitting a partial JPEG as the very
-    first frame after STREAMON. `gap_at` drops frames from the sequence counter to
-    simulate the driver losing them, which is what FLAG_GAP_BEFORE records.
+    `flag_first` reproduces this card's behaviour at STREAMON: the first buffer holds a
+    headless fragment of a frame already in flight. `gap_at` drops frames from the
+    sequence counter to simulate the driver losing them, which is what FLAG_GAP_BEFORE
+    records.
     """
     from vcap.frame import FLAG_CORRUPT, FLAG_GAP_BEFORE
 
@@ -61,16 +72,16 @@ def frames(count: int, *, start_ns: int = 1_000_000_000, period_ns: int = 16_666
     for i in range(count):
         flags = 0
         dropped = 0
-        complete = True
+        headless = False
         if i == 0 and flag_first:
             flags |= FLAG_CORRUPT
-            complete = False
+            headless = True
         if gap_at is not None and i == gap_at:
             seq += gap_frames
             ts += period_ns * gap_frames
             dropped = gap_frames
             flags |= FLAG_GAP_BEFORE
-        data = make_jpeg(width, height, payload=100 + (i % 50), complete=complete)
+        data = make_jpeg(width, height, payload=100 + (i % 50), headless=headless)
         yield Frame(data=data, ts_mono_ns=ts, seq=seq, flags=flags,
                     dropped_before=dropped)
         seq += 1

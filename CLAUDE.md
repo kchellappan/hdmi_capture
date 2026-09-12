@@ -42,10 +42,11 @@ distinguish these cases.
 may silently return something else. Every manifest records both. Never log or store only
 the request.
 
-**Flag, do not discard.** The first frame of every session from this card is a truncated
-JPEG. It is written to the recording with `FLAG_CORRUPT` rather than dropped, because a
-recording with a silently removed frame looks complete and is not. Filtering is the
-consumer's decision — `Recording.flagged()`, `Frame.ok`. The same applies to gaps.
+**Flag, do not discard.** The first frame of nearly every session from this card is an
+undecodable fragment -- the tail of a frame that was in flight when `STREAMON` landed. It
+is written to the recording with `FLAG_CORRUPT` rather than dropped, because a recording
+with a silently removed frame looks complete and is not. Filtering is the consumer's
+decision -- `Recording.flagged()`, `Frame.ok`. The same applies to gaps.
 
 **Record and live are opposite policies.** `AsyncWriter` never drops and raises when it
 cannot keep up; `LatestFrame` always drops and keeps only the newest. Merging them into one
@@ -83,7 +84,7 @@ Do not re-derive these:
 | Trap | Where |
 |---|---|
 | Frames arrive with no HDMI input connected | `docs/hardware.md`, and asserted in `tests/hardware.sh` |
-| The first frame after `STREAMON` is always partial | `docs/hardware.md`, measured over repeated trials |
+| The first frame after `STREAMON` is a headless fragment, on 33 of 34 starts | `docs/hardware.md`; the cause is stream-start alignment, *not* a missing HDMI input |
 | UVC descriptors advertise unsustainable modes | `docs/hardware.md`, and why `vcap/probe.py` exists |
 | `/dev/videoN` numbering moves; two nodes per device | `vcap/device.py` docstring |
 | `/dev/video*` access is a logind ACL, not the `video` group | `docs/hardware.md`, `scripts/install_deps.sh` |

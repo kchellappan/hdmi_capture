@@ -73,7 +73,7 @@ most:
 | Trap | Consequence |
 |---|---|
 | **The card emits frames with nothing connected to its HDMI input** | Every software signal looks healthy while you record 60 fps of a placeholder image. No counter in this repo can detect it — look at the picture first. |
-| The first frame after every stream start is a truncated JPEG | Reproducible, flagged rather than hidden. Filter on `Recording.flagged()`. |
+| The first frame of nearly every stream is an undecodable fragment | It is the *back half* of a frame in flight when `STREAMON` landed — no header, so it cannot be decoded. Flagged, not hidden. Filter on `Recording.flagged()`. |
 | Descriptors advertise modes the card cannot sustain | It claims every geometry in both MJPEG and YUYV at identical rates. Measure with `vcap-probe`; never trust the list. |
 | `/dev/videoN` numbering moves, and two nodes appear per device | One is metadata-only. Always go through `/dev/v4l/by-id/`; `find_capture_card()` does. |
 | A source changing resolution changes the image mid-stream | The V4L2 format does not change with it. `vcap-verify` checks JPEG headers to catch it. |

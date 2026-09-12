@@ -92,11 +92,19 @@ def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
 
 
 def looks_like_jpeg(data: bytes) -> bool:
-    """Whether the payload is a complete JPEG: correct prefix and an end-of-image marker.
+    """Whether the payload is a whole JPEG: a start-of-image *and* an end-of-image marker.
 
-    A capture card that loses its input mid-frame produces a payload that starts
-    correctly and simply stops, so the tail is what distinguishes a whole frame from a
-    fragment.
+    Both ends are checked because fragments occur at both ends, for different reasons.
+
+    A frame missing its head is what STREAMON produces on a capture card that transmits
+    continuously: the driver begins assembling from the payload already in flight, so the
+    first buffer holds the back portion of a frame -- no SOI, no SOF, but a perfectly
+    valid EOI. Measured on this project's card, frame 0 was byte-for-byte the tail of
+    frame 1. See docs/hardware.md.
+
+    A frame missing its tail is what a source cutting out mid-frame produces.
+
+    Checking only the tail would pass the first case, which is the common one.
     """
     return (len(data) >= 4 and data[0] == 0xFF and data[1] == 0xD8
             and data[-2] == 0xFF and data[-1] == 0xD9)

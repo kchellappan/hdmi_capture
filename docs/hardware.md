@@ -57,25 +57,49 @@ stream means a healthy setup.
 The only reliable check is to look at the image, with `vcap-view` or the card's HDMI
 loop-out. Do that before a session, not after.
 
-## The first frame after STREAMON is always incomplete
+## The first frame after STREAMON is a fragment
 
-Reproducible on every stream start, across repeated trials:
+Observed on 33 of 34 stream starts. The first buffer holds a **partial frame missing its
+beginning**:
 
 ```
-trial 0: incomplete frames (index,seq,bytes) = [(0, 0, 34376)]
-trial 1: incomplete frames (index,seq,bytes) = [(0, 0, 35108)]
-trial 2: incomplete frames (index,seq,bytes) = [(0, 0, 34508)]
+frame 0:  21992 bytes  head=2800a2800a28  tail=803fffd9
+frame 1:  41109 bytes  head=ffd8ffdb0043  tail=803fffd9
+frame 2:  41109 bytes  head=ffd8ffdb0043  tail=803fffd9
+
+frame 0 shares its last 21991 bytes with frame 1 -- 100% of frame 0
 ```
 
-Frame `seq=0` is a JPEG that starts correctly and stops before its end-of-image marker.
-Every subsequent frame is complete and parses as 1920x1080.
+So frame 0 is byte-for-byte the tail of the frame that was already in flight. There is no
+start-of-image marker and no `SOF0`, so its geometry is unreadable, but it ends with a
+perfectly valid `FFD9`.
 
-This repo flags it (`FLAG_CORRUPT`) rather than discarding it. Discarding would make the
-recording look complete when the recorder had in fact thrown something away, and the
-frame's timestamp is still real. `vcap-view` skips flagged frames because a partial JPEG
-renders as a broken image; a dataset builder should filter on `Recording.flagged()`.
-`tests/hardware.sh` asserts the behaviour so that a firmware change shows up as a test
-failure rather than as silently dead code.
+**The cause is stream-start alignment, not signal loss.** The card transmits continuously
+whenever it is clocked, and `VIDIOC_STREAMON` begins assembling from whatever USB payload
+arrives next -- which is normally the middle of a frame. `uvcvideo` would ordinarily
+discard such a fragment using the UVC frame-ID and end-of-frame bits; this card evidently
+does not set them in a way that permits it.
+
+Two consequences worth being clear about:
+
+- **It is not specific to having no HDMI input.** It is about the card already
+  transmitting when the stream starts, so expect it with a live source too. The
+  measurements above were taken with nothing connected, which is the one thing they do
+  not tell you -- but the mechanism does not depend on the input.
+- **It is not strictly guaranteed.** One clean start was observed out of 34, where the
+  payload boundary happened to line up. Code should treat a fragmented first frame as
+  very likely, never as certain, and equally should not assume it.
+
+Because the fragment is missing its header it cannot be decoded at all, which is a
+stronger statement than "it looks odd". This repo still writes it, flagged with
+`FLAG_CORRUPT`, rather than discarding it: the recorder throwing frames away silently is
+the failure mode that matters more, and the frame's timestamp is real even though its
+pixels are unusable. `vcap-view` skips flagged frames, and a dataset builder should filter
+on `Recording.flagged()`.
+
+`looks_like_jpeg()` therefore checks for a start-of-image marker as well as an
+end-of-image one. Checking only the tail -- the intuitive choice, since a frame cut short
+by signal loss loses its tail -- passes this case, which is the common one.
 
 ## Two device nodes, and the numbering moves
 
