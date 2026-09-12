@@ -162,10 +162,10 @@ The directories say which language; the name you import or include is `vcap` in 
 Tools: `vcap-list`, `vcap-probe`, `vcap-record`, `vcap-verify`, `vcap-view`,
 `vcap-latency`. All run from a checkout with no install step.
 
-`clients/cpp/` is a C++ capture client that writes the same format — for a recorder with no
-Python in the loop. It captures only; anything it writes is read back with the Python
-reader above, which is what lets it stay dependency-free. See
-[clients/cpp/README.md](clients/cpp/README.md).
+`vcap_cpp/` is a C++ capture implementation that writes the same format — for a recorder
+with no Python in the loop. It captures only; anything it writes is read back with the
+Python reader above, which is what lets it stay dependency-free. See
+[vcap_cpp/README.md](vcap_cpp/README.md).
 
 ## Dependencies
 

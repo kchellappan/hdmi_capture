@@ -2,8 +2,9 @@ __pycache__/
 *.pyc
 .cache/
 
-# C++ client build output
-clients/cpp/build/
+# C++ build output
+vcap_cpp/build/
+vcap_cpp/build-fb/
 compile_commands.json
 
 # Recordings: these are training data, often many gigabytes, and are outputs rather than
