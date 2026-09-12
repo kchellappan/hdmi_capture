@@ -50,10 +50,17 @@ class SegmentWriter:
         self.name = name
         self.segment_bytes = (self.DEFAULT_SEGMENT_BYTES if segment_bytes is None
                               else segment_bytes)
-        # fsync costs a round trip to the device, so doing it per frame at 60 Hz is not
-        # free. Zero means "let the OS decide", which loses at most the page cache on a
-        # hard power loss; the index is append-only and whole records before the cut
-        # survive, so the cost of that loss is bounded and the recording stays readable.
+        # Two different durability questions, deliberately separated.
+        #
+        # Surviving *this process* dying is handled unconditionally, by flushing both
+        # files to the OS after every frame -- see write(). That is cheap and there is no
+        # reason to make it optional.
+        #
+        # Surviving the *machine* losing power is what fsync_every controls, and it is
+        # not cheap: an fsync is a round trip to the device. Zero means "let the OS
+        # decide", which risks only what is still in the page cache; the index is
+        # append-only and whole records before the cut survive, so the loss is bounded
+        # and the recording stays readable.
         self.fsync_every = fsync_every
 
         os.makedirs(directory, exist_ok=True)
@@ -124,6 +131,22 @@ class SegmentWriter:
         self.bytes_written += len(frame)
         if frame.flags:
             self.frames_flagged += 1
+
+        # Push both files to the OS after every frame. This is not fsync -- no platter
+        # is touched and no round trip is paid -- it only moves bytes out of this
+        # process's buffers into the page cache.
+        #
+        # It matters because the index is 32 bytes per frame against a 64 KB buffer,
+        # which is 2048 frames: without this, a process killed with SIGKILL, or an OOM
+        # kill, loses up to 34 seconds of index at 60 Hz while the frames it describes
+        # are already on disk. The frames would survive and their timestamps would not,
+        # and the timestamps are the reason this repo exists.
+        #
+        # Both are flushed, and the stream first, so the index never references bytes
+        # the OS has not seen. Measured cost at 60 Hz: two syscalls per frame, no
+        # change in effective rate or queue depth.
+        self._stream.flush()
+        self._index.flush()
 
         if self.fsync_every:
             self._since_sync += 1

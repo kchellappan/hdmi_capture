@@ -92,10 +92,16 @@ Storage scales linearly with it, since MJPEG compresses each frame independently
 it does, so asking for 25 gets you 30; `vcap-record` says so when that happens. Full table
 in [docs/hardware.md](docs/hardware.md).
 
-Sustained capture loses about **one frame in 750** (0.132%, one roughly every 13 s), always
-a single frame and always right after a damaged one — the signature of a USB transfer error.
-A 15-second run loses none, so it only shows up over real durations. Both neighbours are
-flagged and `Recording.flagged()` lists them.
+Sustained capture loses about **one frame in a thousand** (0.103% over a 20-minute,
+72009-frame burn-in; one roughly every 16 s), always a single frame and always right after a
+damaged one — the signature of a USB transfer error. A 15-second run loses none, so it only
+shows up over real durations. Both neighbours are flagged and `Recording.flagged()` lists
+them.
+
+The loss is **per frame, not per second** — measured at both rates, which rules out a
+fixed-rate hiccup. So halving the capture rate halves the losses per minute but leaves any
+given frame just as likely to be lost. Capture slower if you care how often an episode has
+a hole; it will not change the ~0.1% of pairs that are unusable.
 
 Buy on the USB ID, not the listing. Generic capture cards are relabelled constantly, and a
 single marketplace listing can change vendor or silicon without changing its product page —
@@ -200,10 +206,9 @@ Working and measured on one card, on one machine, over sessions of seconds to a 
 
 Not exercised on hardware:
 
-- **Runs beyond 4 minutes.** Segment rollover is now verified on hardware (a 4-minute,
-  4.27 GB capture crossed the 2 GB boundary cleanly), but there is still no soak test, and
-  nothing has run long enough to cross a *second* boundary or to show whether the drop
-  rate stays flat over hours.
+- **Runs beyond 20 minutes.** A 20-minute burn-in at 1080p60 (72009 frames, 21.2 GB, nine
+  segment rollovers) showed no drift in drop rate, frame interval or queue depth. Nothing
+  has run for hours, and nothing has tested behaviour as a disk approaches full.
 - **A second identical card on the same host.** The `by-id` serial may not be unique on
   this chipset family; `by-path` would distinguish them at the cost of pinning a port.
 - **YUYV as a recording format.** It streams — verified on the card at 1280x720 and on a

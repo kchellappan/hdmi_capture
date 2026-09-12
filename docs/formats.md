@@ -100,6 +100,27 @@ Fields worth knowing about:
   older reader misinterpret a newer recording -- adding a field does not qualify, changing
   the meaning of one does.
 
+## Durability
+
+Two different failures, handled separately.
+
+**This process dying** -- SIGKILL, an OOM kill, an unhandled exception -- is covered
+unconditionally: both files are flushed to the OS after every frame. That is not an fsync,
+costs two syscalls, and measures as no change in frame rate or queue depth at 60 Hz.
+
+It is there because the index is 32 bytes per frame against a 64 KB buffer, which is 2048
+frames. Without the flush, a hard kill lost up to 34 seconds of index at 60 Hz while the
+frames it described were already on disk -- the pixels would survive and their timestamps
+would not, which for this repo is the wrong half to keep.
+
+**The machine losing power** is what `--fsync-every` controls, and it is not free: an fsync
+is a round trip to the device. The default of 0 leaves it to the OS, risking only what is
+still in the page cache. Both files are append-only, so whole records before the cut
+survive and the recording stays readable; `vcap-verify` reports the truncation.
+
+A clean stop needs neither. SIGINT and SIGTERM are handled, the manifest is finalized, and
+`vcap-record` exits with a complete recording.
+
 ## Segments
 
 Rollover defaults to 2 GB. It exists because a single file for a long session cannot be

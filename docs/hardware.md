@@ -62,11 +62,35 @@ captures it, the manifest records `requested` and `granted` separately, and `vca
 prints a note when they differ. Nothing here silently substitutes a rate, but it is worth
 knowing the rounding goes that way before sizing a disk.
 
-## Sustained capture drops about one frame in 750
+## Sustained capture drops about one frame in a thousand
 
-Over a 4-minute run -- 14403 frames, 4.27 GB, 59.98 fps effective -- the driver lost **19
-frames, 0.132%**, roughly one every 13 seconds. A 15-second run loses none, which is why
-this went unnoticed at first: it is not visible at short durations.
+Measured over a 20-minute burn-in at 1080p60 -- 72009 frames, 21.2 GB -- and a 10-minute
+run at 30 Hz:
+
+| | 60 Hz, 20 min | 30 Hz, 10 min |
+|---|---|---|
+| frames | 72009 | 18002 |
+| dropped | 74 | 14 |
+| **% of frames** | **0.103%** | **0.078%** |
+| drops per minute | 3.7 | 1.4 |
+| seconds per drop | 16.2 | 43 |
+| largest single gap | 1 frame | 1 frame |
+| writer queue peak | 7 of 240 | 1 of 240 |
+| interval stdev | 0.034 ms | 0.05 ms |
+
+**The loss is per frame, not per second.** That distinction decides what changing the rate
+buys you, so it was tested rather than assumed. If losses were a fixed-rate USB hiccup, the
+30 Hz run would have shown the same 3.7 per minute -- 37 drops. It showed 14, which that
+model rules out (p = 0.00001). If the probability is per frame, it should have shown 18.5;
+14 is well within noise of that (p = 0.18).
+
+So each frame has roughly a 1-in-1000 chance of being lost regardless of rate. Halving the
+capture rate halves the losses per minute and does **not** improve the odds for any given
+frame.
+
+Which of those matters depends on the question. If it is "how often does an episode contain
+a hole", capture slower. If it is "what fraction of my training pairs are unusable", the
+answer is about 0.1% either way, and the rate is irrelevant.
 
 The losses have a consistent shape:
 
@@ -77,20 +101,22 @@ The losses have a consistent shape:
  2271    37.8    False  True     1
 ```
 
-Always exactly one frame, always immediately after a frame the JPEG check rejects. That
-pattern -- damaged payload, then a discarded frame -- is what a USB transfer error looks
-like from this side of the driver. It was **not** caused by segment rollover, the writer
-queue, or the disk: rollover was clean (see below), and the queue peaked at 26 of 240 with
-no overrun.
+Always exactly one frame, never a run, always immediately after a frame the JPEG check
+rejects. That pattern -- damaged payload, then a discarded frame -- is what a USB transfer
+error looks like from this side of the driver. It is **not** the writer or the disk: the
+queue peaked at 7 of 240 over twenty minutes.
 
-Plan for it rather than trying to eliminate it. At 60 Hz a lost frame is 17 ms, both
-neighbours are flagged, and `Recording.flagged()` lists them -- so a dataset builder can
-drop the affected pairs. If your task cannot tolerate that, capture at 30 Hz, where the
-same loss rate costs half as much wall time and the card has more margin per frame.
+Nothing degrades with time. Across the four quarters of the burn-in the rate was 4.0, 4.0,
+3.0 and 3.8 drops per minute, and the frame interval held a 0.034 ms standard deviation
+with a worst case of 17.82 ms against a 16.66 ms median -- no stalls, no drift.
+
+Plan around it rather than chasing it. Both neighbours of a loss are flagged, and
+`Recording.flagged()` lists them, so a dataset builder can drop the affected pairs.
 
 ## Segment rollover, verified on hardware
 
-A 4-minute capture crossed the 2 GB boundary and produced two segments:
+The 20-minute burn-in wrote **10 segments, crossing the boundary nine times**, for 21.2 GB.
+An earlier 4-minute capture crossed it once:
 
 ```
 seg 0: session.mjpg      6883 frames  2.15 GB
