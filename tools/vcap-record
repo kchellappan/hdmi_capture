@@ -36,8 +36,9 @@ def main() -> int:
                     help="writer queue depth in frames (default 240)")
     ap.add_argument("--fsync-every", type=int, default=0,
                     help="fsync every N frames; 0 lets the OS decide")
-    ap.add_argument("--segment-mb", type=int, default=2048,
-                    help="roll over at this size; 0 disables (default 2048)")
+    ap.add_argument("--segment-mb", type=int, default=16384,
+                    help="roll over at this size; 0 disables (default 16384, ~17 min "
+                         "at 1080p60)")
     ap.add_argument("--patience", type=float, default=5.0,
                     help="seconds of no signal to tolerate before giving up")
     ap.add_argument("--note", action="append", default=[], metavar="KEY=VALUE",

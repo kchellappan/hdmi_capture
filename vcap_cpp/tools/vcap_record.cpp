@@ -40,7 +40,7 @@ void usage() {
         "      --buffers N       kernel buffers (default 4)\n"
         "      --queue N         writer queue depth in frames (default 240)\n"
         "      --fsync-every N   fsync every N frames; 0 lets the OS decide\n"
-        "      --segment-mb N    roll over at this size; 0 disables (default 2048)\n"
+        "      --segment-mb N    roll over at this size; 0 disables (default 16384)\n"
         "      --note K=V        metadata recorded in the manifest\n"
         "  -q, --quiet\n");
 }
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     std::string directory = argv[1], hint, format = "MJPG", name = "session";
     std::uint32_t width = 1920, height = 1080;
     double fps = 60.0, seconds = 0.0;
-    long frames_limit = 0, segment_mb = 2048;
+    long frames_limit = 0, segment_mb = 16384;
     unsigned buffers = 4, fsync_every = 0;
     std::size_t queue_depth = 240;
     bool quiet = false;

@@ -35,11 +35,15 @@ struct SegmentInfo {
 
 class SegmentWriter {
 public:
-    // Rollover exists because one file for a long session cannot be moved off the machine
-    // until the session ends, is refused outright by filesystems with a 4 GB limit, and
-    // loses the whole recording to one corrupt region. At the measured 14.5-19 MB/s a
-    // 2 GB segment is about two and a half minutes. Zero disables rollover.
-    static constexpr std::uint64_t kDefaultSegmentBytes = 2ull * 1024 * 1024 * 1024;
+    // A guardrail, not an organising principle: the unit that matters is the episode,
+    // and the repo that submodules this one sets that by starting and stopping a
+    // recording. The default is large enough that a normal episode is one file -- at the
+    // measured 14.5-19 MB/s, 16 GB is about seventeen minutes of 1080p60. It exists at
+    // all because exFAT refuses anything over 4 GB, a failed copy means restarting the
+    // transfer, and one corrupt region would otherwise cost the whole recording.
+    //
+    // Must track DEFAULT_SEGMENT_BYTES in vcap_py/vcap/writer.py.
+    static constexpr std::uint64_t kDefaultSegmentBytes = 16ull * 1024 * 1024 * 1024;
 
     SegmentWriter(std::string directory, std::string name = "session",
                   std::uint64_t segment_bytes = kDefaultSegmentBytes,

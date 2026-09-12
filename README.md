@@ -126,7 +126,7 @@ most:
 | Descriptors advertise modes the card cannot sustain | It claims every geometry in both MJPEG and YUYV at identical rates. Measure with `vcap-probe`; never trust the list. |
 | `/dev/videoN` numbering moves, and two nodes appear per device | One is metadata-only. Always go through `/dev/v4l/by-id/`; `find_capture_card()` does. |
 | A source changing resolution changes the image mid-stream | The V4L2 format does not change with it. `vcap-verify` checks JPEG headers to catch it. |
-| `/dev/video*` access comes from a logind ACL, not the `video` group | So it works from a desktop session and fails from a service or over SSH. Install the udev rule. |
+| `/dev/video*` access comes from a logind ACL, not the `video` group | So it works from a desktop session and fails from a service or over SSH. Run `scripts/install_deps.sh`. |
 
 Use the card's **HDMI loop-out** to drive the operator's monitor. Hardware pass-through
 adds no latency, which no software preview can match, and it removes any need for this repo
@@ -199,6 +199,13 @@ Two rules, covered in [docs/composition.md](docs/composition.md): this repo and 
 capture repo **never import each other**, and **neither owns the word "episode"** — that
 belongs to the parent repo, which is the only place that knows where a demonstration begins
 and what it was for.
+
+## Setup
+
+There isn't any, for recording — `python3` and a kernel with `uvcvideo` are all it takes.
+`scripts/install_deps.sh` reports what is present and offers to install only what you
+actually need for the optional parts: device access from a service, a C++ toolchain,
+`ffmpeg` for export. `--check` reports without changing anything.
 
 ## Tests
 

@@ -123,14 +123,30 @@ A clean stop needs neither. SIGINT and SIGTERM are handled, the manifest is fina
 
 ## Segments
 
-Rollover defaults to 2 GB. It exists because a single file for a long session cannot be
-moved off the machine until the session ends, is refused outright by filesystems with a
-4 GB limit, and loses the whole recording to one corrupt region.
+**The episode is the real unit, not the segment.** Whatever repo submodules this one
+decides where a demonstration begins and ends, by starting and stopping a `Session`.
+Size-based rollover is a guardrail underneath that, for the case where one recording gets
+genuinely large.
 
-At 1080p60 MJPEG on live content, ~236 KB a frame, a 2 GB segment is about two and a half
-minutes. `--segment-mb 0` disables rollover. Raise `--segment-mb` if that many files is
-inconvenient; the reasons for a bound are a filesystem's 4 GB limit and how much one
-corrupt region costs, not the count.
+So the default is 16 GB — about **seventeen minutes** of 1080p60 — which is longer than
+any demonstration episode is likely to be. In practice one episode is one file and the
+split never appears. `--segment-mb 0` disables it entirely.
+
+It exists at all because exFAT on an external drive refuses anything over 4 GB, a failed
+copy of a 60 GB file means restarting the whole transfer, and one corrupt region would
+otherwise cost the whole recording.
+
+A reader never sees segments: `Recording` presents them as one continuous sequence, so a
+conversion script asking for frame *N* or the frame at timestamp *T* is unaffected by where
+the boundaries fall.
+
+That abstraction is worth being slightly wary of. The only bug this feature has caused —
+index entries numbered per file rather than per session, so an index from `flagged()`
+fetched a frame two minutes away — was invisible in every single-segment recording. At the
+previous 2 GB default a segment was two and a half minutes, so almost every real session
+was multi-segment and the bug was always live; at 16 GB it is the rare case, which is
+safer but also means the multi-segment path gets exercised less. `vcap-verify` and the
+round-trip tests both check it deliberately for that reason.
 
 ## Sizing
 
