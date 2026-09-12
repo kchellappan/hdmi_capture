@@ -8,14 +8,14 @@ on:
 
 jobs:
   test:
-    name: Test suite
+    name: Python suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # The suite needs no capture card and no packages: synthetic JPEGs in tests/fake.py
-      # stand in for the hardware, so the whole storage path runs here. What cannot run
-      # here is anything touching the device -- see tests/hardware.sh.
+      # Needs no capture card and no packages: synthetic JPEGs in tests/fake.py stand in
+      # for the hardware, so the whole storage path runs here. What cannot run here is
+      # anything touching the device -- see tests/hardware.sh.
       - name: Test
         run: ./tests/run_tests.sh
 
@@ -44,15 +44,64 @@ jobs:
       - name: Pin request numbers against videodev2.h
         run: cd tests && python3 test_ioctl_abi.py
 
+  cpp:
+    name: C++ client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compiler versions
+        run: g++ --version && cmake --version
+
+      - name: Build
+        run: clients/cpp/build.sh
+
+      - name: Unit tests
+        run: |
+          clients/cpp/build/test_index_format
+          clients/cpp/build/test_jpeg
+
+      # build.sh falls back to invoking g++ directly when cmake is absent. That path is
+      # load-bearing rather than decorative -- it is what allows a build on a freshly
+      # imaged machine that has a compiler but no cmake -- so it needs to keep working.
+      # Disabling cmake is the only way to exercise it on a runner that has one.
+      - name: Build with the cmake path disabled
+        run: |
+          BUILD_DIR=build-fb USE_CMAKE=0 clients/cpp/build.sh 2>&1 | tee out.log
+          grep -q "falling back to direct g++" out.log
+          test -x clients/cpp/build-fb/vcap-record-cpp
+          test -x clients/cpp/build-fb/write_synthetic
+          clients/cpp/build-fb/test_index_format
+
+  cross-language:
+    name: C++ writes, Python reads
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The contract between the two clients is the file format, not any shared code: a
+      # recording written by C++ is read by a Python reader that never sees that source.
+      # A mismatch there is silent -- a misread index yields plausible offsets into a real
+      # file -- so it is worth its own job rather than being buried in a suite.
+      #
+      # Runs without hardware because the writer does not need any: synthetic JPEGs stand
+      # in for the card, which is what makes the format testable on a runner.
+      - name: Build the C++ client
+        run: clients/cpp/build.sh
+
+      - name: Round trip
+        run: clients/cpp/tests/roundtrip_synthetic.sh
+
   vivid:
     name: Capture loop against the kernel's test device
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # vivid is the kernel's virtual video driver. It is not this capture card and
+      # vivid is the kernel's virtual video driver. It is not the capture card and
       # reproduces none of its firmware behaviour, but it does exercise the real ioctl
       # path, real buffer mmap and real DQBUF -- the parts tests/fake.py cannot reach.
+      # Runners do not always ship it, so both the load and the test skip rather than fail.
       - name: Load vivid
         run: sudo modprobe vivid || echo "vivid unavailable; this job will skip"
 
@@ -63,17 +112,29 @@ jobs:
             exit 0
           fi
           sudo chmod a+rw /dev/video* || true
-          python3 tests/test_vivid.py
+          cd tests && python3 test_vivid.py
 
   shell-scripts:
     name: Shell script syntax
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Every script in the repo, not a hand-maintained list: a new one added under
+      # clients/ would otherwise go unchecked, which is exactly what happened when the C++
+      # client arrived with four of them.
       - name: Parse every script
         run: |
           fail=0
-          for f in scripts/*.sh tests/*.sh; do
+          while IFS= read -r f; do
             if bash -n "$f"; then echo "  ok    $f"; else echo "  FAIL  $f"; fail=1; fi
-          done
+          done < <(find . -name '*.sh' -not -path './.git/*' | sort)
+          exit $fail
+
+      - name: Every script is executable
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if [[ -x "$f" ]]; then echo "  ok    $f"; else echo "  FAIL  $f is not +x"; fail=1; fi
+          done < <(find . -name '*.sh' -not -path './.git/*' | sort)
           exit $fail
