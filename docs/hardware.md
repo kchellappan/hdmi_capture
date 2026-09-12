@@ -27,6 +27,47 @@ live video:   MJPG 1920x1080 @ 60 -> 59.76 fps   236 KB/frame   dropped=0
 The frame size difference matters for planning: live content is about six times the data,
 **14.5-19 MB/s or 52-69 GB/hour**. See [formats.md](formats.md#sizing).
 
+## Sustained capture drops about one frame in 750
+
+Over a 4-minute run -- 14403 frames, 4.27 GB, 59.98 fps effective -- the driver lost **19
+frames, 0.132%**, roughly one every 13 seconds. A 15-second run loses none, which is why
+this went unnoticed at first: it is not visible at short durations.
+
+The losses have a consistent shape:
+
+```
+ idx    t(s)   corrupt  gap  dropped
+ 2269    37.8    True   False    0      <- a damaged frame arrives
+ 2270    37.8    True   True     1      <- then exactly one frame is lost
+ 2271    37.8    False  True     1
+```
+
+Always exactly one frame, always immediately after a frame the JPEG check rejects. That
+pattern -- damaged payload, then a discarded frame -- is what a USB transfer error looks
+like from this side of the driver. It was **not** caused by segment rollover, the writer
+queue, or the disk: rollover was clean (see below), and the queue peaked at 26 of 240 with
+no overrun.
+
+Plan for it rather than trying to eliminate it. At 60 Hz a lost frame is 17 ms, both
+neighbours are flagged, and `Recording.flagged()` lists them -- so a dataset builder can
+drop the affected pairs. If your task cannot tolerate that, capture at 30 Hz, where the
+same loss rate costs half as much wall time and the card has more margin per frame.
+
+## Segment rollover, verified on hardware
+
+A 4-minute capture crossed the 2 GB boundary and produced two segments:
+
+```
+seg 0: session.mjpg      6883 frames  2.15 GB
+seg 1: session.001.mjpg  7520 frames  2.12 GB
+```
+
+The boundary is seamless. The frame sequence is continuous across it (delta 1), the
+interval across it is 16.68 ms -- exactly one frame period, so closing and fsyncing a 2 GB
+file did not stall capture -- and byte offsets restart at 0 in the new segment as intended.
+Reading the recording back presents all 14403 frames as one sequence, and a deep verify of
+every frame took 0.7 s.
+
 It is tempting to read that gap the other way and treat a 40 KB frame as a no-signal
 detector. Do not: genuinely dark or static content compresses small too, so it is a hint
 worth eyeballing and not a fact worth acting on. Nothing in this repo reports it as health.

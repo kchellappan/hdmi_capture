@@ -11,7 +11,7 @@ consumer is expected to do with a JPEG.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import manifest as manifest_mod
 from .frame import Frame
@@ -112,7 +112,13 @@ class Recording:
             else:
                 break
         local = global_index - self._starts[seg]
-        return Located(self._indexes[seg][local], seg, global_index)
+        # IndexReader numbers entries within its own file, but a Recording presents
+        # every segment as one sequence -- so the entry has to be renumbered on the way
+        # out. Without this, entry(i).index is the segment-local index for everything
+        # after the first segment, and an index taken from flagged() fetches a different
+        # frame entirely: in a 4-minute two-segment recording, one 114 seconds away.
+        local_entry = self._indexes[seg][local]
+        return Located(replace(local_entry, index=global_index), seg, global_index)
 
     def entry(self, global_index: int) -> Entry:
         return self._locate(global_index).entry

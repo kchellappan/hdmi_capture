@@ -82,9 +82,14 @@ and `ring.LatestFrame` — rather than one with a mode flag.
 Developed against a **MacroSilicon MS2130** (`345f:2131`), sold as a "Rybozen 4K HDMI to
 USB 3.0 capture card" and under many other names —
 [the unit used here](https://www.amazon.com/dp/B097DKNS1M). It is UVC class, so `uvcvideo`
-drives it with nothing to install. Measured on it, on live 1080p60 video: **59.76 fps
-sustained, 901 frames to disk with no dropped frames** — at **14.5–19 MB/s, or 52–69
-GB/hour**, which is the number to plan storage against.
+drives it with nothing to install. Measured on it, on live 1080p60 video over a 4-minute
+run: **14403 frames to disk at 59.98 fps, 4.27 GB** — at **14.5–19 MB/s, or 52–69 GB/hour**,
+which is the number to plan storage against.
+
+Sustained capture loses about **one frame in 750** (0.132%, one roughly every 13 s), always
+a single frame and always right after a damaged one — the signature of a USB transfer error.
+A 15-second run loses none, so it only shows up over real durations. Both neighbours are
+flagged and `Recording.flagged()` lists them.
 
 Buy on the USB ID, not the listing. Generic capture cards are relabelled constantly, and a
 single marketplace listing can change vendor or silicon without changing its product page —
@@ -189,9 +194,10 @@ Working and measured on one card, on one machine, over sessions of seconds to a 
 
 Not exercised on hardware:
 
-- **Long sessions.** The longest recorded run is 15 s. No soak test, and no session long
-  enough to trigger segment rollover — that path is covered only by synthetic frames, so
-  the 2 GB boundary has never been crossed against a real card.
+- **Runs beyond 4 minutes.** Segment rollover is now verified on hardware (a 4-minute,
+  4.27 GB capture crossed the 2 GB boundary cleanly), but there is still no soak test, and
+  nothing has run long enough to cross a *second* boundary or to show whether the drop
+  rate stays flat over hours.
 - **A second identical card on the same host.** The `by-id` serial may not be unique on
   this chipset family; `by-path` would distinguish them at the cost of pinning a port.
 - **YUYV as a recording format.** It streams — verified on the card at 1280x720 and on a

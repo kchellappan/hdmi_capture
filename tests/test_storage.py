@@ -88,6 +88,9 @@ def main() -> int:
         check("the frame after the gap is marked",
               bool(flagged[1].flags & FLAG_GAP_BEFORE), True)
         check("the gap records how many were lost", flagged[1].dropped_before, 3)
+        check("flagged indices fetch the frames they name",
+              [rec[e.index].ts_mono_ns for e in flagged],
+              [e.ts_mono_ns for e in flagged])
         # The bad frames are still in the recording. Dropping them at capture time would
         # have made a recording with a hole look complete.
         check("flagged frames are still present", len(rec), 60)
@@ -108,6 +111,22 @@ def main() -> int:
         check("no frame is corrupted by a segment boundary", mismatched, [])
         check("sequence numbers stay continuous across segments",
               [rec[i].seq for i in (0, 99, 100, 199)], [0, 99, 100, 199])
+
+        # Entries must be numbered by their position in the session, not in the file
+        # they happen to live in. This was wrong in the first implementation: entries
+        # from the second segment onwards carried their segment-local index, so an
+        # index taken from flagged() fetched a different frame -- on a real 4-minute
+        # recording, one 114 seconds away. A dataset builder filtering on flagged()
+        # would have excluded good frames and kept the bad ones, silently.
+        misnumbered = [i for i in range(200) if rec.entry(i).index != i]
+        check("entries are numbered globally, not per segment", misnumbered, [])
+
+        # The property that actually matters downstream: an index from an entry can be
+        # used to fetch that same frame.
+        round_trips = all(
+            rec[rec.entry(i).index].ts_mono_ns == rec.entry(i).ts_mono_ns
+            for i in range(0, 200, 7))
+        check("an entry's index fetches that entry's frame", round_trips, True)
         target = rec.entry(150).ts_mono_ns
         check("timestamp lookup crosses segments", rec.index_at(target), 150)
         span = rec.span_ns()
