@@ -74,33 +74,34 @@ def load_tk():
 class Measurement:
     """State shared between the capture thread and the window."""
 
-    def __init__(self, samples_wanted: int, timeout: float):
-        self.samples_wanted = samples_wanted
+    def __init__(self, frames_wanted: int, timeout: float):
+        self.frames_wanted = frames_wanted
         self.deadline = time.monotonic() + timeout
-        self.latencies: list[float] = []
+        # Raw frames, decoded only after capture finishes. See capture() for why.
+        self.captured: list[tuple[bytes, int]] = []
         self.frames_seen = 0
-        self.jpeg_failures = 0
-        self.decode_failures = 0
-        self.last_reason = "no frame decoded yet"
-        self.last_image = None
-        self.acquired = False
         self.error: str | None = None
         self.done = threading.Event()
         self.lock = threading.Lock()
 
-    def enough(self) -> bool:
-        return len(self.latencies) >= self.samples_wanted
-
 
 def capture(device, width: int, height: int, fps: float, state: Measurement,
             quiet: bool) -> None:
-    """Pull frames, decode the pattern, record the difference. Runs off the main thread.
+    """Collect frames and their timestamps. Decode nothing. Runs off the main thread.
 
-    tkinter insists on owning the main thread, and the capture loop must not be blocked by
-    it -- a window redraw stalling DQBUF would cost frames and, worse, would correlate the
-    thing being measured with the measuring.
+    Decoding here would corrupt the measurement, which is not obvious and cost a wrong
+    answer before it was noticed. DC-decoding a 1080p frame takes about 107 ms of pure
+    Python, so decoding inline at 60 Hz saturates the interpreter lock and starves the Tk
+    redraw -- the pattern on screen goes stale, and the "latency" being measured is mostly
+    that staleness. The first end-to-end run reported a median of 296 ms with a 248 ms
+    spread and a minimum of 64 ms; the minimum was the only honest figure in it, caught
+    when the pattern had just happened to refresh.
+
+    Nothing about a frame changes by being decoded later: its pixels encode the draw time
+    and its timestamp records the capture instant, both fixed the moment it arrives. So
+    the loop here does the cheapest thing that preserves both -- dequeue, copy, store --
+    and the decoding happens once the window has closed.
     """
-    last_status = 0.0
     try:
         with VideoSource(device, "MJPG", width, height, fps=fps) as source:
             for frame in source.frames(timeout=3.0, patience=None):
@@ -110,64 +111,65 @@ def capture(device, width: int, height: int, fps: float, state: Measurement,
                     continue
                 with state.lock:
                     state.frames_seen += 1
-                try:
-                    image = decode_dc(frame.data)
-                except JpegError as exc:
-                    with state.lock:
-                        state.jpeg_failures += 1
-                        state.last_reason = f"JPEG: {exc}"
-                    continue
-                with state.lock:
-                    state.last_image = image
-                try:
-                    encoded = decode_dc_image(image)
-                except DecodeError as exc:
-                    with state.lock:
-                        state.decode_failures += 1
-                        state.last_reason = str(exc)
-                    now = time.monotonic()
-                    if not quiet and not state.acquired and now - last_status >= 1.0:
-                        line = (f"  waiting: {state.frames_seen} frames, none readable "
-                                f"-- {state.last_reason}")
-                        sys.stderr.write("\r" + line[:78].ljust(78))
-                        sys.stderr.flush()
-                        last_status = now
-                    continue
-
-                frame_ms = frame.ts_mono_ns / 1e6
-                drawn_ms = reconstruct_ms(encoded, frame_ms)
-                latency = frame_ms - drawn_ms
-                # Outside this range the pattern was misread in a way the checksum did not
-                # catch. It is the strongest filter available: a wrong decode lands
-                # anywhere in the 17-minute window, so almost none of them look plausible.
-                if not -50.0 < latency < 1000.0:
-                    with state.lock:
-                        state.decode_failures += 1
-                        state.last_reason = (f"decoded a timestamp implying "
-                                             f"{latency:.0f} ms, outside the plausible "
-                                             f"range")
-                    continue
-
-                with state.lock:
-                    state.latencies.append(latency)
-                    count = len(state.latencies)
-                    if not state.acquired:
-                        state.acquired = True
-                        if not quiet:
-                            sys.stderr.write("\r" + " " * 78 + "\r")
-                            print(f"  pattern acquired after {state.frames_seen} frames "
-                                  f"({latency:.1f} ms)", flush=True)
+                    state.captured.append((frame.data, frame.ts_mono_ns))
+                    count = len(state.captured)
                 if not quiet and count % 20 == 0:
-                    sys.stderr.write(f"\r  {count}/{state.samples_wanted} samples   ")
+                    sys.stderr.write(f"\r  {count}/{state.frames_wanted} frames   ")
                     sys.stderr.flush()
-                if state.enough():
+                if count >= state.frames_wanted:
                     break
     except NoSignal as exc:
         state.error = f"no signal: {exc}"
     except StreamError as exc:
         state.error = f"stream failed: {exc}"
+    except OSError as exc:
+        # EBUSY is the common one: another capture already has the device. It is an
+        # ordinary mistake and deserves a sentence rather than a thread traceback.
+        state.error = (f"cannot open {device.node}: {exc}\n"
+                       f"Another program may be using the card -- vcap-view, another "
+                       f"recording, or a stale run of this tool.")
     finally:
         state.done.set()
+
+
+def measure(state: Measurement, quiet: bool) -> tuple[list[float], dict]:
+    """Decode the captured frames and turn them into latencies."""
+    latencies: list[float] = []
+    stats = {"jpeg_failures": 0, "decode_failures": 0, "implausible": 0,
+             "last_reason": "no frame decoded", "last_image": None}
+    total = len(state.captured)
+    for index, (data, ts_mono_ns) in enumerate(state.captured):
+        if not quiet and index % 20 == 0:
+            sys.stderr.write(f"\r  decoding {index}/{total}   ")
+            sys.stderr.flush()
+        try:
+            image = decode_dc(data)
+        except JpegError as exc:
+            stats["jpeg_failures"] += 1
+            stats["last_reason"] = f"JPEG: {exc}"
+            continue
+        stats["last_image"] = image
+        try:
+            encoded = decode_dc_image(image)
+        except DecodeError as exc:
+            stats["decode_failures"] += 1
+            stats["last_reason"] = str(exc)
+            continue
+
+        frame_ms = ts_mono_ns / 1e6
+        latency = frame_ms - reconstruct_ms(encoded, frame_ms)
+        # Outside this range the pattern was misread in a way the checksum did not catch.
+        # It is the strongest filter available: a wrong decode lands anywhere in the
+        # 17-minute window, so almost none of them look like a plausible latency.
+        if not -50.0 < latency < 1000.0:
+            stats["implausible"] += 1
+            stats["last_reason"] = (f"decoded a timestamp implying {latency:.0f} ms, "
+                                    f"outside the plausible range")
+            continue
+        latencies.append(latency)
+    if not quiet:
+        sys.stderr.write("\r" + " " * 40 + "\r")
+    return latencies, stats
 
 
 def show_pattern(tk, geometry: str, state: Measurement, fullscreen: bool) -> None:
@@ -258,7 +260,8 @@ def main() -> int:
                     help="fullscreen the window; not required, the pattern self-locates")
     ap.add_argument("--list-outputs", action="store_true",
                     help="show the monitors this can see, and exit")
-    ap.add_argument("--samples", type=int, default=120)
+    ap.add_argument("--frames", type=int, default=180,
+                    help="frames to capture before decoding (default 180, ~3 s at 60 Hz)")
     ap.add_argument("--timeout", type=float, default=120.0)
     ap.add_argument("--preview", action="store_true",
                     help="print the captured frame as ASCII once acquired")
@@ -308,7 +311,7 @@ def main() -> int:
         print(f"  the window need not be fullscreen -- the pattern locates itself\n",
               flush=True)
 
-    state = Measurement(args.samples, args.timeout)
+    state = Measurement(args.frames, args.timeout)
     worker = threading.Thread(target=capture,
                               args=(device, int(width), int(height), args.fps, state,
                                     args.json),
@@ -327,15 +330,25 @@ def main() -> int:
         print(state.error, file=sys.stderr)
         return 1
 
-    if not state.latencies:
-        print(f"no readable frames: {state.frames_seen} captured, "
-              f"{state.jpeg_failures} failed to JPEG-decode, {state.decode_failures} "
-              f"had no readable pattern.\n", file=sys.stderr)
-        if state.last_image is not None:
-            for line in describe_failure(state.last_image, state.last_reason):
+    if not state.captured:
+        print("no frames captured.", file=sys.stderr)
+        return 1
+
+    # Decoding happens here, with the window closed, so it cannot interfere with what was
+    # being measured. See capture().
+    latencies, stats = measure(state, args.json)
+
+    if not latencies:
+        print(f"no readable frames: {len(state.captured)} captured, "
+              f"{stats['jpeg_failures']} failed to JPEG-decode, "
+              f"{stats['decode_failures']} had no readable pattern, "
+              f"{stats['implausible']} decoded to an implausible time.\n",
+              file=sys.stderr)
+        if stats["last_image"] is not None:
+            for line in describe_failure(stats["last_image"], stats["last_reason"]):
                 print(line, file=sys.stderr)
             print("\n  what the card is seeing:\n", file=sys.stderr)
-            for line in ascii_preview(state.last_image):
+            for line in ascii_preview(stats["last_image"]):
                 print("    " + line, file=sys.stderr)
             print("", file=sys.stderr)
         print("  Check that the window opened on the display feeding the card, that it "
@@ -343,7 +356,6 @@ def main() -> int:
               "(vcap-probe).", file=sys.stderr)
         return 1
 
-    latencies = state.latencies
     result = {
         "samples": len(latencies),
         "median_ms": round(statistics.median(latencies), 2),
@@ -351,9 +363,10 @@ def main() -> int:
         "min_ms": round(min(latencies), 2),
         "max_ms": round(max(latencies), 2),
         "stdev_ms": round(statistics.stdev(latencies), 2) if len(latencies) > 2 else 0.0,
-        "frames_seen": state.frames_seen,
-        "decode_failures": state.decode_failures,
-        "jpeg_failures": state.jpeg_failures,
+        "frames_captured": len(state.captured),
+        "decode_failures": stats["decode_failures"],
+        "jpeg_failures": stats["jpeg_failures"],
+        "implausible": stats["implausible"],
         "capture_offset_ns": int(statistics.median(latencies) * 1e6),
         "method": "glass-to-glass, tk draw call to kernel frame timestamp, "
                   "uncorrected for pre-scanout bias",
@@ -362,8 +375,8 @@ def main() -> int:
         print(json.dumps(result, indent=2))
         return 0
 
-    if args.preview and state.last_image is not None:
-        for line in ascii_preview(state.last_image):
+    if args.preview and stats["last_image"] is not None:
+        for line in ascii_preview(stats["last_image"]):
             print("    " + line)
         print()
     print(f"  samples          {result['samples']}")
@@ -371,8 +384,9 @@ def main() -> int:
     print(f"  mean             {result['mean_ms']:.2f} ms")
     print(f"  min / max        {result['min_ms']:.2f} / {result['max_ms']:.2f} ms")
     print(f"  stdev            {result['stdev_ms']:.2f} ms")
-    print(f"  unreadable       {result['decode_failures']} decodes, "
-          f"{result['jpeg_failures']} frames")
+    print(f"  captured         {result['frames_captured']} frames")
+    print(f"  unreadable       {result['decode_failures']} patterns, "
+          f"{result['jpeg_failures']} JPEGs, {result['implausible']} implausible")
     print()
     print("  This is an UPPER BOUND. The draw call returns before the compositor has")
     print("  shown anything, so true photon-to-kernel latency is shorter by up to one")

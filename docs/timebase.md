@@ -89,6 +89,37 @@ anything, so the true photon-to-kernel interval is shorter by up to one refresh 
 about 16 ms at 60 Hz. Subtract half a refresh period for a central estimate if you want
 one.
 
+### Measured on this setup
+
+A laptop's HDMI output into the MS2130, captured at 1080p60, GNOME on Wayland:
+
+```
+run 1: median 53.46 ms   min 47.04  max 59.88  sd 3.00  (150 samples)
+run 2: median 62.31 ms   min 54.16  max 68.97  sd 3.85  (150 samples)
+run 3: median 64.35 ms   min 56.34  max 84.40  sd 4.10  (148 samples)
+```
+
+So roughly **60 ms, give or take 6**, before subtracting the pre-scanout bias.
+
+**Run it more than once.** The spread within a run is 3-4 ms, but between runs it is about
+11 ms -- larger than either. A single run therefore looks more precise than the measurement
+actually is. The likely cause is the phase between the draw loop and the display refresh,
+which is fixed for the length of a run and different on the next one.
+
+### Do not decode while measuring
+
+The first end-to-end run reported a median of 296 ms with a 248 ms standard deviation, and
+it was measuring the tool rather than the hardware. DC-decoding a 1080p frame takes about
+107 ms of pure Python, so decoding each frame as it arrived saturated the interpreter lock
+and starved the drawing loop -- the pattern on screen went stale, and the staleness was
+what got measured.
+
+`vcap-glass-to-glass` now captures frames without decoding them and decodes afterwards,
+which changes nothing about the result: a frame's pixels encode the draw time and its
+timestamp records the capture instant, both fixed the moment it arrives. Anything else
+built on this pattern needs the same separation, and the symptom to watch for is a standard
+deviation far larger than a frame period.
+
 The figure is reported uncorrected on purpose. A correction folded in silently cannot be
 undone by whoever reads the number later, which is the same reason the offset is never
 folded into frame timestamps.
