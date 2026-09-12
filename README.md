@@ -1,5 +1,22 @@
 # hdmi_capture
 
+> **This repository is primarily AI-generated, with human review.** Treat it accordingly:
+> read it before you depend on it.
+>
+> What that means in practice here. The hardware claims are **measured, not asserted** —
+> the figures in this README and in `docs/hardware.md` came from running against the card
+> named below, and the commit messages record what was measured and what was found wrong.
+> Three documented claims were corrected during development after measurement contradicted
+> them, including a storage figure that was six times too low. The hardware-free test suite
+> was checked by mutation: each test was confirmed to fail when the behaviour it covers is
+> broken. Where a claim is second-hand rather than measured — the MS2109 notes in
+> `docs/hardware.md` are the main case — it says so on the spot.
+>
+> What that does **not** cover: one capture card, on one machine, over short sessions. No
+> long-run or multi-day soak, no second card, no non-x86 host, and no review by anyone who
+> has shipped a V4L2 binding before. The `Status` section at the bottom lists what is
+> known-untested; it is deliberately specific, and it is not exhaustive.
+
 Video capture for control-and-video data collection on Linux. Records an HDMI source
 through a USB capture card, keeping the kernel's per-frame timestamp intact so the frames
 can be paired with controls captured on the same machine — for replaying repetitive
@@ -154,10 +171,24 @@ live in `tests/hardware.sh`.
 
 ## Status
 
-Working and measured on one card, on one machine. Not yet exercised: a second identical
-card on the same host (the `by-id` serial may not be unique), YUYV capture at any
-resolution, audio, and anything about the MS2109 variant. `vcap/export/to_lerobot.py` is
-named in the design but not written.
+Working and measured on one card, on one machine, over sessions of seconds to a minute.
+
+Not exercised on hardware:
+
+- **Long sessions.** The longest recorded run is 15 s. No soak test, and no session long
+  enough to trigger segment rollover — that path is covered only by synthetic frames, so
+  the 2 GB boundary has never been crossed against a real card.
+- **A second identical card on the same host.** The `by-id` serial may not be unique on
+  this chipset family; `by-path` would distinguish them at the cost of pinning a port.
+- **YUYV as a recording format.** It streams — verified on the card at 1280x720 and on a
+  UVC webcam at 1080p — but no session has been recorded in it, and the corruption check
+  in `source.read()` is MJPEG-only, so a raw capture gets no structural validation.
+- **Audio**, which this repo does not touch at all.
+- **The MS2109 variant**, and non-x86-64 hosts.
+
+`vcap/export/to_lerobot.py` is named in the design and not written. The display-to-USB
+latency offset (`timebase.capture_offset_ns`) is never populated automatically and needs a
+control recording to measure — see [docs/timebase.md](docs/timebase.md).
 
 ## License
 
