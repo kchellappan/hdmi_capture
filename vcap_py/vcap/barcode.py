@@ -82,6 +82,26 @@ class DecodeError(ValueError):
     """The pattern could not be read out of this frame."""
 
 
+def sample_bars(columns: list[int]) -> list[float]:
+    """Mean level of each bar, before any thresholding.
+
+    Split out of decode_columns so a caller that failed to decode can report what it
+    actually saw. A latency tool whose only output is "could not read the pattern" leaves
+    someone staring at a display with no way to tell whether the page is in the wrong
+    place, the band is off screen, or the contrast is simply too low -- and that is the
+    normal first experience of a physical setup.
+    """
+    width = len(columns)
+    out: list[float] = []
+    for bar in range(TOTAL_BARS):
+        centre = bar_centre_fraction(bar) * width
+        half = BAR_WIDTH * width * SAMPLE_FRACTION / 2.0
+        lo = max(0, int(round(centre - half)))
+        hi = min(width, max(lo + 1, int(round(centre + half))))
+        out.append(sum(columns[lo:hi]) / (hi - lo))
+    return out
+
+
 def decode_columns(columns: list[int]) -> int:
     """Recover the value from one row of column means spanning the full frame width.
 
@@ -92,15 +112,7 @@ def decode_columns(columns: list[int]) -> int:
         raise DecodeError(f"only {len(columns)} columns; too few to resolve "
                           f"{TOTAL_BARS} bars")
 
-    width = len(columns)
-    samples: list[float] = []
-    for bar in range(TOTAL_BARS):
-        centre = bar_centre_fraction(bar) * width
-        half = BAR_WIDTH * width * SAMPLE_FRACTION / 2.0
-        lo = max(0, int(round(centre - half)))
-        hi = min(width, max(lo + 1, int(round(centre + half))))
-        samples.append(sum(columns[lo:hi]) / (hi - lo))
-
+    samples = sample_bars(columns)
     white, black = samples[0], samples[1]
     if white - black < MIN_CONTRAST * 255:
         raise DecodeError(
@@ -129,10 +141,7 @@ def decode_dc_image(image) -> int:
     the browser draws at the very top of the viewport, and the bottom edge blurs into the
     page content below.
     """
-    band_top = int(image.height * BAND_TOP)
-    band_bottom = int(image.height * (BAND_TOP + BAND_HEIGHT))
-    inset = max(1, (band_bottom - band_top) // 4)
-    return decode_columns(image.column_means(band_top + inset, band_bottom - inset))
+    return decode_columns(band_columns(image))
 
 
 # The pattern carries only the low bits of a millisecond clock, so a reader has to rebuild
@@ -157,3 +166,11 @@ def reconstruct_ms(encoded: int, reference_ms: float) -> float:
     base = int(reference_ms) // WRAP_MS * WRAP_MS
     candidates = (base + encoded - WRAP_MS, base + encoded, base + encoded + WRAP_MS)
     return float(min(candidates, key=lambda c: abs(reference_ms - c)))
+
+
+def band_columns(image) -> list[int]:
+    """The column means decode_dc_image works from. Exposed for diagnostics."""
+    band_top = int(image.height * BAND_TOP)
+    band_bottom = int(image.height * (BAND_TOP + BAND_HEIGHT))
+    inset = max(1, (band_bottom - band_top) // 4)
+    return image.column_means(band_top + inset, band_bottom - inset)

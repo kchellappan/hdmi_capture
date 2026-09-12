@@ -12,9 +12,10 @@ import sys
 
 import fake_jpeg
 
-from vcap.barcode import (BAR_WIDTH, BAND_HEIGHT, BAND_TOP, DATA_BITS, TOTAL_BARS,
-                          WRAP_MS, DecodeError, checksum, decode_columns,
-                          decode_dc_image, encode, reconstruct_ms)
+from vcap.barcode import (BAR_WIDTH, BAND_HEIGHT, BAND_TOP, DATA_BITS, SYNC_BARS,
+                          TOTAL_BARS, WRAP_MS, DecodeError, band_columns, checksum,
+                          decode_columns, decode_dc_image, encode, reconstruct_ms,
+                          sample_bars)
 from vcap.jpeg_dc import decode_dc
 
 FAILURES: list[str] = []
@@ -122,6 +123,21 @@ def main() -> int:
         check("end to end at 720p", decode_dc_image(decode_dc(data)), 271828)
     except DecodeError as exc:
         FAILURES.append(f"end to end at 720p failed: {exc}")
+
+    # The diagnostic surface. A failed measurement reports what it saw, so these are
+    # load-bearing rather than incidental -- without them the tool's only output on a
+    # misconfigured display is "could not read the pattern".
+    columns = render_columns(424242, white=190, black=70)
+    bars = sample_bars(columns)
+    check("sample_bars returns one level per bar", len(bars), TOTAL_BARS)
+    check("it reports the white reference it actually saw", round(bars[0]), 190)
+    check("and the black one", round(bars[1]), 70)
+
+    data = fake_jpeg.encode_bars(encode(555), 240, 135, BAR_WIDTH, BAND_TOP, BAND_HEIGHT)
+    image = decode_dc(data)
+    extracted = band_columns(image)
+    check("band_columns spans the full frame width", len(extracted), image.width)
+    check("and the band it picks decodes", decode_columns(extracted), 555)
 
     for line in FAILURES:
         print(f"  FAIL  {line}")

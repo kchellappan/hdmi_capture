@@ -45,8 +45,8 @@ import time
 
 import _bootstrap  # noqa: F401
 from vcap.barcode import (BAND_HEIGHT, BAND_TOP, BAR_WIDTH, DATA_BITS, WRAP_MS,
-                          DecodeError, SYNC_BARS, TOTAL_BARS, decode_dc_image,
-                          reconstruct_ms)
+                          DecodeError, SYNC_BARS, TOTAL_BARS, band_columns,
+                          decode_dc_image, reconstruct_ms, sample_bars)
 from vcap.device import find_capture_card
 from vcap.jpeg_dc import JpegError, decode_dc
 from vcap.source import NoSignal, StreamError, VideoSource
@@ -126,6 +126,42 @@ measureOffset(20).then(best => {
 """
 
 
+def ascii_preview(image, width: int = 72, height: int = 20) -> list[str]:
+    """The captured frame as ASCII, so a failure can be looked at rather than guessed at.
+
+    This is how the DC decoder was validated in the first place -- a browser window
+    rendered as text is unmistakable -- and it answers the question a failed decode
+    actually raises: is the page even on screen?
+    """
+    ramp = " .:-=+*#%@"
+    rows = []
+    for y in range(height):
+        sy = min(image.height - 1, y * image.height // height)
+        row = []
+        for x in range(width):
+            sx = min(image.width - 1, x * image.width // width)
+            row.append(ramp[min(9, image.at(sx, sy) * 10 // 256)])
+        rows.append("".join(row))
+    return rows
+
+
+def describe_failure(image, reason: str) -> list[str]:
+    """What was seen, in terms someone standing at the display can act on."""
+    lines = [f"  last decode failure: {reason}"]
+    try:
+        columns = band_columns(image)
+        bars = sample_bars(columns)
+        lines.append(f"  reference bars:      white {bars[0]:.0f}, black {bars[1]:.0f} "
+                     f"(need a gap of {0.15 * 255:.0f}+)")
+        levels = " ".join(f"{b:.0f}" for b in bars[SYNC_BARS:SYNC_BARS + 8])
+        lines.append(f"  first data bars:     {levels} ...")
+    except Exception as exc:                        # noqa: BLE001 - diagnostics only
+        lines.append(f"  could not sample the band: {exc}")
+    lines.append(f"  frame geometry:      {image.full_width}x{image.full_height} "
+                 f"({image.width}x{image.height} blocks)")
+    return lines
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -172,6 +208,8 @@ def main() -> int:
                     help="successful decodes to collect (default 120)")
     ap.add_argument("--timeout", type=float, default=120.0,
                     help="give up after this long (default 120 s)")
+    ap.add_argument("--preview", action="store_true",
+                    help="print the captured frame as ASCII once, then continue")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -182,7 +220,15 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    server = Server((args.bind, args.port), Handler)
+    try:
+        server = Server((args.bind, args.port), Handler)
+    except OSError as exc:
+        # Running this twice, or leaving a previous run alive, is an ordinary mistake and
+        # deserves a sentence rather than a traceback.
+        print(f"cannot serve on {args.bind}:{args.port}: {exc}", file=sys.stderr)
+        print("Another copy may still be running. Use --port, or stop it.",
+              file=sys.stderr)
+        return 2
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     if not args.json:
@@ -195,8 +241,12 @@ def main() -> int:
     latencies: list[float] = []
     decode_failures = 0
     jpeg_failures = 0
+    frames_seen = 0
     first_seen = False
+    last_reason = "no frame decoded yet"
+    last_image = None
     deadline = time.monotonic() + args.timeout
+    last_status = 0.0
     exit_code = 0
 
     try:
@@ -206,15 +256,32 @@ def main() -> int:
                     break
                 if not frame.ok:
                     continue
+                frames_seen += 1
                 try:
                     image = decode_dc(frame.data)
-                except JpegError:
+                except JpegError as exc:
                     jpeg_failures += 1
+                    last_reason = f"JPEG: {exc}"
                     continue
+                last_image = image
                 try:
                     encoded = decode_dc_image(image)
-                except DecodeError:
+                except DecodeError as exc:
                     decode_failures += 1
+                    # The message names the cause -- low contrast with the levels it
+                    # saw, or a checksum mismatch. Discarding it, as an earlier version
+                    # did, left "could not read the pattern" as the only output.
+                    last_reason = str(exc)
+                    now = time.monotonic()
+                    if not args.json and not first_seen and now - last_status >= 1.0:
+                        # Kept inside 78 columns: a status line that wraps cannot be
+                        # overwritten by the carriage return, and leaves a smear of
+                        # half-lines behind it.
+                        line = (f"  waiting: {frames_seen} frames, none readable "
+                                f"-- {last_reason}")
+                        sys.stderr.write("\r" + line[:78].ljust(78))
+                        sys.stderr.flush()
+                        last_status = now
                     continue
 
                 frame_ms = frame.ts_mono_ns / 1e6
@@ -224,10 +291,18 @@ def main() -> int:
                 # checksum did not catch, or the page had not locked its clock offset yet.
                 if not -50.0 < latency < 1000.0:
                     decode_failures += 1
+                    last_reason = (f"decoded a timestamp implying {latency:.0f} ms, "
+                                   f"outside the plausible range")
                     continue
                 latencies.append(latency)
                 if not first_seen and not args.json:
-                    print("  pattern acquired\n", flush=True)
+                    sys.stderr.write("\r" + " " * 78 + "\r")
+                    print(f"  pattern acquired after {frames_seen} frames "
+                          f"({latency:.1f} ms)\n", flush=True)
+                    if args.preview:
+                        for line in ascii_preview(image):
+                            print("    " + line)
+                        print("", flush=True)
                     first_seen = True
                 if len(latencies) >= args.samples:
                     break
@@ -249,10 +324,21 @@ def main() -> int:
         sys.stderr.write("\n")
 
     if not latencies:
-        print("no readable frames. Is the page fullscreen on the display the card is "
-              "capturing?", file=sys.stderr)
-        if jpeg_failures:
-            print(f"({jpeg_failures} frames could not be DC-decoded)", file=sys.stderr)
+        print(f"no readable frames: {frames_seen} captured, {jpeg_failures} failed to "
+              f"JPEG-decode, {decode_failures} had no readable pattern.\n",
+              file=sys.stderr)
+        if last_image is not None:
+            for line in describe_failure(last_image, last_reason):
+                print(line, file=sys.stderr)
+            print("\n  what the card is seeing:\n", file=sys.stderr)
+            for line in ascii_preview(last_image):
+                print("    " + line, file=sys.stderr)
+            print("", file=sys.stderr)
+        print("  The bar pattern is a band across the TOP of the page, so:\n"
+              "    - the page must be fullscreen (F11); browser chrome covers the band\n"
+              "    - the display must be the one feeding the capture card\n"
+              "    - --size must match what the card is actually sending "
+              "(check vcap-probe)", file=sys.stderr)
         return 1
 
     result = {
