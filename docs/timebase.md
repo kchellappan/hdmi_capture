@@ -47,8 +47,15 @@ it will look like a subtle control-tuning problem rather than a data bug.
 
 So:
 
-- The offset is **measured once per setup**, with `tools/vcap-latency` supplying the video
-  half and your control recording supplying the other.
+- The offset is **measured once per setup**. Two tools, for two situations:
+
+  | | |
+  |---|---|
+  | `vcap-glass-to-glass` | When the machine capturing is also the machine driving the display. Self-contained: it puts a clock on the screen and reads it back out of the captured frame, so both ends are already on one clock. |
+  | `vcap-latency` | When the source is something else -- a console, another machine. It supplies the video half only; your control recording supplies the other. |
+
+  Prefer the first where the setup allows it, because it needs nothing but this repo and
+  gives a number in one run.
 - It is **recorded** in `manifest.timebase.capture_offset_ns`, together with
   `capture_offset_method` describing how it was obtained.
 - It is **never folded into `ts_mono_ns`**. A corrected timestamp is indistinguishable
@@ -58,6 +65,64 @@ So:
 
 `capture_offset_ns` defaults to `null`, which means nobody has measured it. That is
 honest, and it is better than a plausible default that quietly becomes fact.
+
+### What glass-to-glass actually measures
+
+`vcap-glass-to-glass` opens a window of black and white bars encoding this process's own
+`CLOCK_MONOTONIC`, and reports the interval from drawing a frame to the kernel timestamping
+the captured frame that shows it. That covers compositing, scanout, the cable, the card and
+the USB transfer.
+
+One process, one clock, no synchronisation -- which is the same property the rest of this
+document rests on. An earlier version served a page to a browser and had the page estimate
+the offset between its clock and the server's, NTP-style. That worked, and every part of it
+was a thing that could be wrong.
+
+The window does **not** need to be fullscreen, or any particular size, or in any particular
+place. The pattern carries its own reference bars at both ends, so the reader locates it.
+That is not a convenience: getting a window fullscreen on a chosen monitor is the least
+portable thing in this repo, and on GNOME/Wayland `--kiosk` silently did not take.
+
+It is an **upper bound**, and the tool says so in its own output. A toolkit cannot report
+when a frame reached the glass; the draw call returns before the compositor has shown
+anything, so the true photon-to-kernel interval is shorter by up to one refresh period --
+about 16 ms at 60 Hz. Subtract half a refresh period for a central estimate if you want
+one.
+
+### Measured on this setup
+
+A laptop's HDMI output into the MS2130, captured at 1080p60, GNOME on Wayland:
+
+```
+run 1: median 53.46 ms   min 47.04  max 59.88  sd 3.00  (150 samples)
+run 2: median 62.31 ms   min 54.16  max 68.97  sd 3.85  (150 samples)
+run 3: median 64.35 ms   min 56.34  max 84.40  sd 4.10  (148 samples)
+```
+
+So roughly **60 ms, give or take 6**, before subtracting the pre-scanout bias.
+
+**Run it more than once.** The spread within a run is 3-4 ms, but between runs it is about
+11 ms -- larger than either. A single run therefore looks more precise than the measurement
+actually is. The likely cause is the phase between the draw loop and the display refresh,
+which is fixed for the length of a run and different on the next one.
+
+### Do not decode while measuring
+
+The first end-to-end run reported a median of 296 ms with a 248 ms standard deviation, and
+it was measuring the tool rather than the hardware. DC-decoding a 1080p frame takes about
+107 ms of pure Python, so decoding each frame as it arrived saturated the interpreter lock
+and starved the drawing loop -- the pattern on screen went stale, and the staleness was
+what got measured.
+
+`vcap-glass-to-glass` now captures frames without decoding them and decodes afterwards,
+which changes nothing about the result: a frame's pixels encode the draw time and its
+timestamp records the capture instant, both fixed the moment it arrives. Anything else
+built on this pattern needs the same separation, and the symptom to watch for is a standard
+deviation far larger than a frame period.
+
+The figure is reported uncorrected on purpose. A correction folded in silently cannot be
+undone by whoever reads the number later, which is the same reason the offset is never
+folded into frame timestamps.
 
 ## Aligning, in practice
 

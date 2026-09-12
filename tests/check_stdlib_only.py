@@ -67,9 +67,9 @@ def python_files() -> list[pathlib.Path]:
 
 def main() -> int:
     stdlib = set(sys.stdlib_module_names)
-    # First-party: the package itself, the tools' sys.path shim, and the test helper
-    # that stands in for a capture card.
-    local = {"vcap", "_bootstrap", "fake"}
+    # First-party: the package itself, the tools' sys.path shim, and the test helpers
+    # that stand in for a capture card and for a JPEG encoder.
+    local = {"vcap", "_bootstrap", "fake", "fake_jpeg"}
     failures = []
 
     for path in python_files():

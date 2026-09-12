@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""Measure the delay from drawing something to the frame arriving in the kernel.
+
+A frame's timestamp says when the USB frame reached the kernel. It does not say when the
+photons left the display, and the difference -- the source's output pipeline, the card's
+buffering, the USB transfer -- is tens of milliseconds that no API reports. An action
+recorded 50 ms before the frame it caused trains a policy to act early, consistently
+enough to look like a control-tuning problem rather than a data bug.
+
+tools/vcap-latency gives half the measurement and needs a control recording for the other
+half. This gives the whole thing, using the one trick available when the machine driving
+the display is also the machine capturing it: put a clock on the screen and read it back.
+
+  1. Connect this machine's HDMI output to the capture card's input.
+  2. Run this. A window of black and white bars opens on that display.
+  3. It reports the round trip.
+
+The window draws the current time in milliseconds, on this process's own CLOCK_MONOTONIC,
+as a pattern of bars. Each captured frame is decoded back to that number and subtracted
+from the frame's own timestamp. One clock, one process, no synchronisation of any kind --
+which is the same property the whole repo rests on. See docs/timebase.md.
+
+The pattern is self-locating, so the window does not have to be fullscreen, a particular
+size, or in a particular place. It only has to be visible on the display the card is
+capturing.
+
+WHAT THIS MEASURES: the interval from this program drawing a frame to the kernel
+timestamping the captured frame that shows it. That covers compositing, scanout, the
+cable, the card and the USB transfer.
+
+WHAT IT DOES NOT: a toolkit cannot report when a frame reached the glass. The draw call
+returns before the compositor has shown anything, so the true photon-to-kernel interval is
+SHORTER than this figure by up to one refresh period -- about 16 ms at 60 Hz. Treat the
+result as an upper bound, and subtract half a refresh period for a central estimate. It is
+reported uncorrected on purpose: a correction folded in silently cannot be undone by
+whoever reads the number later.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+import threading
+import time
+
+import _bootstrap  # noqa: F401
+from vcap.barcode import (DecodeError, RENDER_MARGIN, TOTAL_BARS, WRAP_MS, band_columns,
+                          decode_dc_image, encode, locate, reconstruct_ms, sample_bars)
+from vcap.device import find_capture_card
+from vcap.jpeg_dc import JpegError, decode_dc
+from vcap.outputs import list_outputs, pick_external
+from vcap.source import NoSignal, StreamError, VideoSource
+
+def load_tk():
+    """Import tkinter, or explain how to get it.
+
+    tkinter is in the standard library but Debian and Ubuntu package it separately, so on
+    a fresh capture box `import tkinter` fails even though nothing was left out of the
+    Python install. Worth saying outright rather than surfacing a bare ImportError.
+    """
+    try:
+        import tkinter
+        return tkinter
+    except ImportError:
+        print("this tool needs tkinter to draw the pattern.\n"
+              "  Debian/Ubuntu:  sudo apt install python3-tk\n"
+              "  Fedora:         sudo dnf install python3-tkinter\n"
+              "It is part of the standard library but packaged separately; nothing else "
+              "in this repo needs it.", file=sys.stderr)
+        return None
+
+
+class Measurement:
+    """State shared between the capture thread and the window."""
+
+    def __init__(self, frames_wanted: int, timeout: float):
+        self.frames_wanted = frames_wanted
+        self.deadline = time.monotonic() + timeout
+        # Raw frames, decoded only after capture finishes. See capture() for why.
+        self.captured: list[tuple[bytes, int]] = []
+        self.frames_seen = 0
+        self.error: str | None = None
+        self.done = threading.Event()
+        self.lock = threading.Lock()
+
+
+def capture(device, width: int, height: int, fps: float, state: Measurement,
+            quiet: bool) -> None:
+    """Collect frames and their timestamps. Decode nothing. Runs off the main thread.
+
+    Decoding here would corrupt the measurement, which is not obvious and cost a wrong
+    answer before it was noticed. DC-decoding a 1080p frame takes about 107 ms of pure
+    Python, so decoding inline at 60 Hz saturates the interpreter lock and starves the Tk
+    redraw -- the pattern on screen goes stale, and the "latency" being measured is mostly
+    that staleness. The first end-to-end run reported a median of 296 ms with a 248 ms
+    spread and a minimum of 64 ms; the minimum was the only honest figure in it, caught
+    when the pattern had just happened to refresh.
+
+    Nothing about a frame changes by being decoded later: its pixels encode the draw time
+    and its timestamp records the capture instant, both fixed the moment it arrives. So
+    the loop here does the cheapest thing that preserves both -- dequeue, copy, store --
+    and the decoding happens once the window has closed.
+    """
+    try:
+        with VideoSource(device, "MJPG", width, height, fps=fps) as source:
+            for frame in source.frames(timeout=3.0, patience=None):
+                if state.done.is_set() or time.monotonic() > state.deadline:
+                    break
+                if not frame.ok:
+                    continue
+                with state.lock:
+                    state.frames_seen += 1
+                    state.captured.append((frame.data, frame.ts_mono_ns))
+                    count = len(state.captured)
+                if not quiet and count % 20 == 0:
+                    sys.stderr.write(f"\r  {count}/{state.frames_wanted} frames   ")
+                    sys.stderr.flush()
+                if count >= state.frames_wanted:
+                    break
+    except NoSignal as exc:
+        state.error = f"no signal: {exc}"
+    except StreamError as exc:
+        state.error = f"stream failed: {exc}"
+    except OSError as exc:
+        # EBUSY is the common one: another capture already has the device. It is an
+        # ordinary mistake and deserves a sentence rather than a thread traceback.
+        state.error = (f"cannot open {device.node}: {exc}\n"
+                       f"Another program may be using the card -- vcap-view, another "
+                       f"recording, or a stale run of this tool.")
+    finally:
+        state.done.set()
+
+
+def measure(state: Measurement, quiet: bool) -> tuple[list[float], dict]:
+    """Decode the captured frames and turn them into latencies."""
+    latencies: list[float] = []
+    stats = {"jpeg_failures": 0, "decode_failures": 0, "implausible": 0,
+             "last_reason": "no frame decoded", "last_image": None}
+    total = len(state.captured)
+    for index, (data, ts_mono_ns) in enumerate(state.captured):
+        if not quiet and index % 20 == 0:
+            sys.stderr.write(f"\r  decoding {index}/{total}   ")
+            sys.stderr.flush()
+        try:
+            image = decode_dc(data)
+        except JpegError as exc:
+            stats["jpeg_failures"] += 1
+            stats["last_reason"] = f"JPEG: {exc}"
+            continue
+        stats["last_image"] = image
+        try:
+            encoded = decode_dc_image(image)
+        except DecodeError as exc:
+            stats["decode_failures"] += 1
+            stats["last_reason"] = str(exc)
+            continue
+
+        frame_ms = ts_mono_ns / 1e6
+        latency = frame_ms - reconstruct_ms(encoded, frame_ms)
+        # Outside this range the pattern was misread in a way the checksum did not catch.
+        # It is the strongest filter available: a wrong decode lands anywhere in the
+        # 17-minute window, so almost none of them look like a plausible latency.
+        if not -50.0 < latency < 1000.0:
+            stats["implausible"] += 1
+            stats["last_reason"] = (f"decoded a timestamp implying {latency:.0f} ms, "
+                                    f"outside the plausible range")
+            continue
+        latencies.append(latency)
+    if not quiet:
+        sys.stderr.write("\r" + " " * 40 + "\r")
+    return latencies, stats
+
+
+def show_pattern(tk, geometry: str, state: Measurement, fullscreen: bool) -> None:
+    """Open the bar window and keep it drawing until the measurement finishes."""
+    root = tk.Tk()
+    root.title("vcap glass-to-glass")
+    root.configure(bg="#101010")
+    root.geometry(geometry)
+    if fullscreen:
+        root.attributes("-fullscreen", True)
+    canvas = tk.Canvas(root, highlightthickness=0, bd=0, bg="#101010")
+    canvas.pack(fill="both", expand=True)
+    rectangles = [canvas.create_rectangle(0, 0, 0, 0, width=0, fill="#000000")
+                  for _ in range(TOTAL_BARS)]
+    label = canvas.create_text(10, 10, anchor="nw", fill="#404040",
+                               text="vcap glass-to-glass")
+
+    def layout(_event=None):
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        left = w * RENDER_MARGIN
+        span = w * (1.0 - 2 * RENDER_MARGIN)
+        pitch = span / TOTAL_BARS
+        band = max(8, int(h * 0.25))
+        for index, rect in enumerate(rectangles):
+            x0 = left + index * pitch
+            canvas.coords(rect, x0, 0, x0 + pitch, band)
+        canvas.coords(label, 10, band + 10)
+
+    def tick():
+        if state.done.is_set():
+            root.destroy()
+            return
+        # The timestamp is taken immediately before the fills are set. Everything after
+        # this -- Tk's redraw, compositing, scanout -- is part of what is being measured.
+        value = (time.monotonic_ns() // 1_000_000) % WRAP_MS
+        for rect, bit in zip(rectangles, encode(value)):
+            canvas.itemconfig(rect, fill="#ffffff" if bit else "#000000")
+        root.after(8, tick)
+
+    root.bind("<Configure>", layout)
+    root.protocol("WM_DELETE_WINDOW", state.done.set)
+    root.after(0, lambda: (layout(), tick()))
+    root.mainloop()
+
+
+def ascii_preview(image, width: int = 72, height: int = 20) -> list[str]:
+    """The captured frame as ASCII, so a failure can be looked at rather than guessed at.
+
+    This is how the DC decoder was validated in the first place -- a window rendered as
+    text is unmistakable -- and it answers the question a failed decode actually raises:
+    is the pattern even on screen?
+    """
+    ramp = " .:-=+*#%@"
+    rows = []
+    for y in range(height):
+        sy = min(image.height - 1, y * image.height // height)
+        rows.append("".join(
+            ramp[min(9, image.at(min(image.width - 1, x * image.width // width), sy)
+                     * 10 // 256)] for x in range(width)))
+    return rows
+
+
+def describe_failure(image, reason: str) -> list[str]:
+    """What was seen, in terms someone standing at the display can act on."""
+    lines = [f"  last decode failure: {reason}"]
+    try:
+        columns = band_columns(image)
+        left, pitch = locate(columns)
+        bars = sample_bars(columns, left, pitch)
+        lines.append(f"  located pattern at:  column {left:.0f}, {pitch:.1f} per bar")
+        lines.append(f"  reference bars:      white {bars[0]:.0f}, black {bars[1]:.0f}")
+    except DecodeError as exc:
+        lines.append(f"  could not locate the pattern: {exc}")
+    lines.append(f"  frame geometry:      {image.full_width}x{image.full_height} "
+                 f"({image.width}x{image.height} blocks)")
+    return lines
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-d", "--device", help="by-id path, /dev/videoN, or a name substring")
+    ap.add_argument("--size", default="1920x1080", help="capture geometry")
+    ap.add_argument("--fps", type=float, default=60.0)
+    ap.add_argument("--output", help="monitor to draw on, by name (see --list-outputs)")
+    ap.add_argument("--geometry", help="place the window explicitly, as WxH+X+Y")
+    ap.add_argument("--fullscreen", action="store_true",
+                    help="fullscreen the window; not required, the pattern self-locates")
+    ap.add_argument("--list-outputs", action="store_true",
+                    help="show the monitors this can see, and exit")
+    ap.add_argument("--frames", type=int, default=180,
+                    help="frames to capture before decoding (default 180, ~3 s at 60 Hz)")
+    ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--preview", action="store_true",
+                    help="print the captured frame as ASCII once acquired")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    outputs = list_outputs()
+    if args.list_outputs:
+        if not outputs:
+            print("could not read the monitor layout (no xrandr, or no X/XWayland). "
+                  "Use --geometry to place the window by hand.", file=sys.stderr)
+            return 1
+        for output in outputs:
+            print(f"  {output}")
+        return 0
+
+    tk = load_tk()
+    if tk is None:
+        return 2
+
+    width, _, height = args.size.partition("x")
+    try:
+        device = find_capture_card(args.device)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.geometry:
+        geometry = args.geometry
+        where = f"at {geometry}"
+    else:
+        target = pick_external(outputs, args.output)
+        if target is None:
+            # Guessing between monitors would put the pattern on the wrong one and look
+            # like a decode failure, so say what was found and let the operator choose.
+            found = ", ".join(o.name for o in outputs) or "none"
+            print(f"cannot tell which display feeds the capture card (found: {found}).\n"
+                  f"Pass --output NAME or --geometry WxH+X+Y. --list-outputs shows them.",
+                  file=sys.stderr)
+            return 2
+        geometry = target.geometry
+        where = f"on {target.name} ({geometry})"
+
+    if not args.json:
+        print(f"\n  capturing from {device.path}")
+        print(f"  drawing the pattern {where}")
+        print(f"  the window need not be fullscreen -- the pattern locates itself\n",
+              flush=True)
+
+    state = Measurement(args.frames, args.timeout)
+    worker = threading.Thread(target=capture,
+                              args=(device, int(width), int(height), args.fps, state,
+                                    args.json),
+                              daemon=True)
+    worker.start()
+    try:
+        show_pattern(tk, geometry, state, args.fullscreen)
+    except KeyboardInterrupt:
+        state.done.set()
+    worker.join(timeout=5.0)
+
+    if not args.json:
+        sys.stderr.write("\n")
+
+    if state.error:
+        print(state.error, file=sys.stderr)
+        return 1
+
+    if not state.captured:
+        print("no frames captured.", file=sys.stderr)
+        return 1
+
+    # Decoding happens here, with the window closed, so it cannot interfere with what was
+    # being measured. See capture().
+    latencies, stats = measure(state, args.json)
+
+    if not latencies:
+        print(f"no readable frames: {len(state.captured)} captured, "
+              f"{stats['jpeg_failures']} failed to JPEG-decode, "
+              f"{stats['decode_failures']} had no readable pattern, "
+              f"{stats['implausible']} decoded to an implausible time.\n",
+              file=sys.stderr)
+        if stats["last_image"] is not None:
+            for line in describe_failure(stats["last_image"], stats["last_reason"]):
+                print(line, file=sys.stderr)
+            print("\n  what the card is seeing:\n", file=sys.stderr)
+            for line in ascii_preview(stats["last_image"]):
+                print("    " + line, file=sys.stderr)
+            print("", file=sys.stderr)
+        print("  Check that the window opened on the display feeding the card, that it "
+              "is\n  not covered, and that --size matches what the card sends "
+              "(vcap-probe).", file=sys.stderr)
+        return 1
+
+    result = {
+        "samples": len(latencies),
+        "median_ms": round(statistics.median(latencies), 2),
+        "mean_ms": round(statistics.mean(latencies), 2),
+        "min_ms": round(min(latencies), 2),
+        "max_ms": round(max(latencies), 2),
+        "stdev_ms": round(statistics.stdev(latencies), 2) if len(latencies) > 2 else 0.0,
+        "frames_captured": len(state.captured),
+        "decode_failures": stats["decode_failures"],
+        "jpeg_failures": stats["jpeg_failures"],
+        "implausible": stats["implausible"],
+        "capture_offset_ns": int(statistics.median(latencies) * 1e6),
+        "method": "glass-to-glass, tk draw call to kernel frame timestamp, "
+                  "uncorrected for pre-scanout bias",
+    }
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.preview and stats["last_image"] is not None:
+        for line in ascii_preview(stats["last_image"]):
+            print("    " + line)
+        print()
+    print(f"  samples          {result['samples']}")
+    print(f"  median           {result['median_ms']:.2f} ms")
+    print(f"  mean             {result['mean_ms']:.2f} ms")
+    print(f"  min / max        {result['min_ms']:.2f} / {result['max_ms']:.2f} ms")
+    print(f"  stdev            {result['stdev_ms']:.2f} ms")
+    print(f"  captured         {result['frames_captured']} frames")
+    print(f"  unreadable       {result['decode_failures']} patterns, "
+          f"{result['jpeg_failures']} JPEGs, {result['implausible']} implausible")
+    print()
+    print("  This is an UPPER BOUND. The draw call returns before the compositor has")
+    print("  shown anything, so true photon-to-kernel latency is shorter by up to one")
+    print(f"  refresh period (~{1000 / 60:.0f} ms at 60 Hz). Reported uncorrected.")
+    print()
+    print("  Record it in a session manifest as:")
+    print(f'    timebase.capture_offset_ns = {result["capture_offset_ns"]}')
+    print(f'    timebase.capture_offset_method = "{result["method"]}"')
+    print("  Do not fold it into frame timestamps -- see docs/timebase.md.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
