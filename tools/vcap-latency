@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Find the instant the captured image changed, so an end-to-end offset can be measured.
+
+A frame's timestamp says when the USB frame reached the kernel. It does not say when the
+photons left the source display, and nothing in software can tell you: the console's
+output pipeline, the card's internal buffering and the USB transfer all add delay that is
+invisible from here. That total is a fixed offset of tens of milliseconds and it matters,
+because an action recorded 50 ms before the frame it caused will train a policy to act
+early.
+
+The offset has to be measured once per setup, and measuring it needs both halves. This
+tool provides the video half: it watches for the moment the image changes and prints that
+change's timestamp on CLOCK_MONOTONIC. Pair it with the timestamp your control capture
+recorded for the button press that caused the change, and the difference is the offset.
+
+Subtract nothing automatically. Record the number in the session manifest's
+timebase.capture_offset_ns, with how it was measured, and let whoever aligns the data
+decide what to do about it.
+
+  1. Point the card at a display showing something that changes sharply on a button
+     press -- a menu cursor, a muzzle flash, a full-screen colour change is ideal.
+  2. Run this. Press the button. It reports the change onset.
+  3. Read the press timestamp out of your control recording.
+  4. offset = onset_ts - press_ts.
+
+Change is detected from compressed payload size, not pixels, so this needs no decoder: an
+intra-only codec produces a markedly different frame size when the image changes, and a
+full-screen change is unmistakable. That makes it insensitive to small motion, which is
+the right trade for this measurement -- a sharp, large change is what you want to be
+timing anyway.
+"""
+from __future__ import annotations
+
+import argparse
+import statistics
+import sys
+import time
+
+import _bootstrap  # noqa: F401
+from vcap.device import find_capture_card
+from vcap.source import NoSignal, StreamError, VideoSource
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-d", "--device", help="by-id path, /dev/videoN, or a name substring")
+    ap.add_argument("--size", default="1920x1080")
+    ap.add_argument("--fps", type=float, default=60.0)
+    ap.add_argument("--threshold", type=float, default=6.0,
+                    help="payload size change in standard deviations (default 6)")
+    ap.add_argument("--baseline", type=int, default=60,
+                    help="frames used to learn the resting frame size (default 60)")
+    ap.add_argument("--count", type=int, default=5,
+                    help="how many change events to report before exiting")
+    ap.add_argument("--settle", type=float, default=0.25,
+                    help="seconds to ignore after an event, so one change reports once")
+    args = ap.parse_args()
+
+    width, _, height = args.size.partition("x")
+    try:
+        device = find_capture_card(args.device)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        with VideoSource(device, "MJPG", int(width), int(height), fps=args.fps) as src:
+            sizes: list[int] = []
+            print(f"learning the resting image from {args.baseline} frames; "
+                  f"keep the screen still", flush=True)
+            for frame in src.frames(patience=None):
+                if frame.ok:
+                    sizes.append(len(frame))
+                if len(sizes) >= args.baseline:
+                    break
+            mean = statistics.mean(sizes)
+            sd = statistics.stdev(sizes) if len(sizes) > 2 else 0.0
+            if sd <= 0:
+                # A perfectly static source gives zero variance, which would make any
+                # threshold infinite. Fall back to a proportion of the frame size.
+                sd = max(1.0, mean * 0.01)
+            limit = args.threshold * sd
+            print(f"resting frame: {mean / 1024:.1f} KB  sd {sd / 1024:.2f} KB  "
+                  f"-> trigger at {limit / 1024:.2f} KB of change")
+            print(f"\npress the button now. Reporting {args.count} events.\n", flush=True)
+
+            events = 0
+            muted_until = 0.0
+            previous = None
+            for frame in src.frames(patience=None):
+                if not frame.ok:
+                    continue
+                size = len(frame)
+                if previous is not None:
+                    delta = abs(size - previous)
+                    now = time.monotonic()
+                    if delta > limit and now >= muted_until:
+                        events += 1
+                        print(f"change {events}: onset ts_mono_ns = {frame.ts_mono_ns}"
+                              f"   (seq {frame.seq}, "
+                              f"{delta / 1024:+.1f} KB, "
+                              f"{size / 1024:.1f} KB total)", flush=True)
+                        muted_until = now + args.settle
+                        if events >= args.count:
+                            break
+                previous = size
+    except KeyboardInterrupt:
+        return 0
+    except NoSignal as exc:
+        print(f"no signal: {exc}", file=sys.stderr)
+        return 1
+    except StreamError as exc:
+        print(f"stream failed: {exc}", file=sys.stderr)
+        return 1
+
+    print("\nPair each onset with the control timestamp of the press that caused it.")
+    print("offset_ns = onset_ts_mono_ns - press_ts_mono_ns")
+    print("Record the result in the manifest as timebase.capture_offset_ns; do not fold")
+    print("it into frame timestamps.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

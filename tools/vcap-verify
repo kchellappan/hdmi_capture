@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Check that a recording is internally consistent, and report what it lost.
+
+Run this before using a session as training data. It answers four questions the manifest
+alone cannot: does every index entry point at bytes that exist, is every frame a complete
+image, are the timestamps monotonic, and where are the gaps.
+
+Exit status is 0 when the recording is usable, 1 when it is damaged, and 2 when it could
+not be opened at all.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+import _bootstrap  # noqa: F401
+from vcap.frame import (FLAG_CORRUPT, FLAG_DRIVER_ERROR, FLAG_GAP_BEFORE,
+                        jpeg_dimensions, looks_like_jpeg)
+from vcap.reader import Recording
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("directory", help="a session directory or its manifest.json")
+    ap.add_argument("--deep", action="store_true",
+                    help="read and structurally check every frame, not just a sample")
+    ap.add_argument("--sample", type=int, default=200,
+                    help="frames to check without --deep (default 200)")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    try:
+        rec = Recording(args.directory)
+    except (OSError, ValueError) as exc:
+        print(f"cannot open: {exc}", file=sys.stderr)
+        return 2
+
+    report: dict = {"frames": len(rec), "problems": []}
+    with rec:
+        m = rec.manifest
+        report["session"] = m.get("session")
+        report["granted"] = m.get("granted")
+        report["timebase"] = m.get("timebase")
+        report["monotonic"] = rec.timestamps_are_monotonic
+
+        if not rec.timestamps_are_monotonic:
+            report["problems"].append(
+                "frame timestamps are not on CLOCK_MONOTONIC; this recording cannot be "
+                "aligned against controls captured on this machine")
+
+        if "ended" not in m:
+            report["problems"].append(
+                "manifest has no end record: the session did not shut down cleanly. "
+                "Frames before the cut are still valid")
+
+        if len(rec) == 0:
+            report["problems"].append("recording contains no frames")
+            _emit(report, args.json)
+            return 1
+
+        # Timestamps must not go backwards. uvcvideo derives them from a hardware clock
+        # it interpolates, so a regression means the interpolation was reset mid-stream
+        # -- which happens when the HDMI source renegotiates -- and any alignment across
+        # that point is wrong.
+        regressions = []
+        previous = None
+        for i in range(len(rec)):
+            ts = rec.entry(i).ts_mono_ns
+            if previous is not None and ts < previous:
+                regressions.append(i)
+            previous = ts
+        report["timestamp_regressions"] = len(regressions)
+        if regressions:
+            report["problems"].append(
+                f"{len(regressions)} timestamp regression(s), first at frame "
+                f"{regressions[0]}")
+
+        flagged = rec.flagged()
+        report["flagged"] = {
+            "total": len(flagged),
+            "driver_error": sum(1 for e in flagged if e.flags & FLAG_DRIVER_ERROR),
+            "corrupt": sum(1 for e in flagged if e.flags & FLAG_CORRUPT),
+            "gap_before": sum(1 for e in flagged if e.flags & FLAG_GAP_BEFORE),
+        }
+        report["driver_dropped_total"] = sum(e.dropped_before for e in flagged)
+
+        span = rec.span_ns()
+        duration_s = (span[1] - span[0]) / 1e9 if span else 0.0
+        report["duration_s"] = duration_s
+        report["measured_fps"] = (len(rec) - 1) / duration_s if duration_s > 0 else None
+
+        # Structural check. Sampling by default because reading every frame of a long
+        # session is an I/O-bound minute or more, and a truncated stream shows up in the
+        # first mismatched length regardless.
+        indices = (range(len(rec)) if args.deep
+                   else sorted(set(
+                       [0, len(rec) - 1]
+                       + list(range(0, len(rec), max(1, len(rec) // args.sample))))))
+        checked = unreadable = incomplete = 0
+        wrong_size = []
+        expected = ((m.get("granted") or {}).get("width"),
+                    (m.get("granted") or {}).get("height"))
+        for i in indices:
+            try:
+                frame = rec[i]
+            except IOError as exc:
+                unreadable += 1
+                if len(report["problems"]) < 10:
+                    report["problems"].append(f"frame {i}: {exc}")
+                continue
+            checked += 1
+            if (m.get("granted") or {}).get("pixelformat") == "MJPG":
+                if not looks_like_jpeg(frame.data):
+                    incomplete += 1
+                    continue
+                dims = jpeg_dimensions(frame.data)
+                if dims and expected[0] and dims != expected:
+                    wrong_size.append((i, dims))
+        report["checked"] = checked
+        report["unreadable"] = unreadable
+        report["incomplete_jpeg"] = incomplete
+        if wrong_size:
+            # The card changes output geometry when its HDMI input changes mode, without
+            # the V4L2 format changing underneath us. A session that spans such a change
+            # holds frames of two different sizes.
+            report["problems"].append(
+                f"{len(wrong_size)} frame(s) have geometry other than "
+                f"{expected[0]}x{expected[1]}, first at {wrong_size[0][0]} "
+                f"({wrong_size[0][1]}); the HDMI source likely changed mode mid-session")
+        if unreadable:
+            report["problems"].insert(
+                0, f"{unreadable} frame(s) could not be read: the stream is truncated")
+
+    ok = not any(p for p in report["problems"]
+                 if "truncated" in p or "no frames" in p or "regression" in p
+                 or "CLOCK_MONOTONIC" in p)
+    report["usable"] = ok
+    _emit(report, args.json)
+    return 0 if ok else 1
+
+
+def _emit(report: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(report, indent=2))
+        return
+    print(f"frames:     {report['frames']}")
+    if report.get("duration_s"):
+        print(f"duration:   {report['duration_s']:.2f} s"
+              f"  ({report['measured_fps']:.2f} fps measured)")
+    g = report.get("granted") or {}
+    print(f"format:     {g.get('pixelformat')} {g.get('width')}x{g.get('height')} "
+          f"@ {g.get('fps')} requested")
+    tb = report.get("timebase") or {}
+    print(f"timebase:   {tb.get('clock')}, {tb.get('source')}")
+    f = report.get("flagged") or {}
+    print(f"flagged:    {f.get('total', 0)}  "
+          f"(driver errors {f.get('driver_error', 0)}, "
+          f"incomplete {f.get('corrupt', 0)}, "
+          f"after a gap {f.get('gap_before', 0)})")
+    print(f"dropped:    {report.get('driver_dropped_total', 0)} frames, by the driver")
+    print(f"checked:    {report.get('checked', 0)} frames read"
+          f"{' (deep)' if report.get('checked') == report['frames'] else ' (sampled)'}")
+    if report.get("unreadable"):
+        print(f"unreadable: {report['unreadable']}")
+    if report.get("incomplete_jpeg"):
+        print(f"incomplete: {report['incomplete_jpeg']} of those were partial JPEGs")
+    print()
+    if report["problems"]:
+        print("problems:")
+        for p in report["problems"]:
+            print(f"  - {p}")
+    else:
+        print("no problems found")
+    print(f"\n{'USABLE' if report.get('usable') else 'DAMAGED'}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

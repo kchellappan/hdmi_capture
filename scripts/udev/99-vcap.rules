@@ -1,0 +1,27 @@
+# Stable name and non-desktop access for the capture card.
+#
+# Two problems this solves.
+#
+# Numbering: a UVC device registers a video node and a metadata node, and which
+# /dev/videoN each lands on depends on what enumerated first. ATTR{index}=="0" selects
+# the video node specifically -- without it the rule also matches the metadata node,
+# which enumerates no formats and is not usable for capture.
+#
+# Access: /dev/video* is root:video, and a desktop session can open it only because
+# systemd-logind grants the active local user an ACL. That ACL does not exist for a
+# systemd service, an SSH login or a cron job, all of which will fail with EACCES.
+# TAG+="uaccess" reapplies the logind ACL; the video group membership is what makes it
+# work without an active seat.
+#
+# Install with scripts/install_deps.sh, or by hand:
+#   sudo cp scripts/udev/99-vcap.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# MacroSilicon MS2130, sold as a Rybozen 4K HDMI-to-USB 3.0 capture card among others.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="345f", ATTRS{idProduct}=="2131", \
+  ATTR{index}=="0", SYMLINK+="vcap0", GROUP="video", MODE="0660", TAG+="uaccess"
+
+# The older USB 2.0 chip in similar packaging. It cannot sustain 1080p60 -- see
+# docs/hardware.md -- but the rule costs nothing and saves a confusing EACCES.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="534d", ATTRS{idProduct}=="2109", \
+  ATTR{index}=="0", SYMLINK+="vcap0", GROUP="video", MODE="0660", TAG+="uaccess"

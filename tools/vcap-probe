@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Measure what a capture device actually delivers, mode by mode.
+
+Negotiates each advertised mode, streams it, and reports the frame rate that arrived.
+This takes a couple of seconds per mode and is the only way to tell a real capability
+from a descriptor the firmware is merely willing to accept.
+
+Needs a live signal on the card's HDMI input for the numbers to mean anything about the
+source -- though note that this card emits frames even with nothing connected, so a
+result here is not evidence that an input is attached. See docs/hardware.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+
+import _bootstrap  # noqa: F401
+from vcap.device import find_capture_card
+from vcap.probe import measure, measure_all
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-d", "--device", help="by-id path, /dev/videoN, or a name substring")
+    ap.add_argument("--format", default="MJPG",
+                    help="pixel format to probe, or 'all' (default: MJPG)")
+    ap.add_argument("--mode", help="probe one mode only, as WIDTHxHEIGHT[@FPS]")
+    ap.add_argument("--seconds", type=float, default=2.0,
+                    help="how long to stream each mode (default: 2)")
+    ap.add_argument("--every-rate", action="store_true",
+                    help="probe every advertised rate, not just the highest")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    device = find_capture_card(args.device)
+    print(f"{device.path}\n    {device.card}\n")
+
+    if args.mode:
+        geometry, _, rate = args.mode.partition("@")
+        width, _, height = geometry.partition("x")
+        results = [measure(device, args.format, int(width), int(height),
+                           float(rate) if rate else None, seconds=args.seconds)]
+    else:
+        formats = (("MJPG", "YUYV") if args.format == "all"
+                   else (args.format,))
+        results = measure_all(device, pixelformats=formats, seconds=args.seconds,
+                              max_rate_only=not args.every_rate)
+
+    if args.json:
+        print(json.dumps([r.__dict__ for r in results], indent=2, default=str))
+        return 0
+
+    for r in results:
+        print("  " + r.summary())
+        if r.usable and r.interval_ms:
+            i = r.interval_ms
+            print(f"        interval ms: median {i['median']:.2f}  "
+                  f"min {i['min']:.2f}  max {i['max']:.2f}  sd {i['stdev']:.2f}")
+    print()
+    usable = [r for r in results if r.usable]
+    if usable:
+        best = max(usable, key=lambda r: (r.width * r.height, r.fps_measured or 0))
+        print(f"highest sustained: {best.pixelformat} {best.width}x{best.height} "
+              f"@ {best.fps_measured:.1f} fps")
+    return 0 if usable else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

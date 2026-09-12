@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.cache/
+
+# Recordings: these are training data, often many gigabytes, and are outputs rather than
+# sources. At 1080p60 a single session is ~8.8 GB/hour.
+data/
+*.mjpg
+*.idx
+
+# Exports
+*.mp4
+*.mkv

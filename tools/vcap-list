@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""List V4L2 capture devices and the modes they advertise.
+
+Advertised, not verified. Use vcap-probe to find out which of these the device can
+actually sustain -- on a USB capture card the two lists differ substantially.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+import _bootstrap  # noqa: F401
+from vcap.device import enumerate_devices
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--all", action="store_true",
+                    help="include metadata and output-only nodes")
+    ap.add_argument("--modes", action="store_true", help="list every advertised mode")
+    args = ap.parse_args()
+
+    devices = enumerate_devices(capture_only=not args.all)
+
+    if args.json:
+        print(json.dumps([{
+            **d.identity(),
+            "capture": d.is_capture,
+            "metadata": d.is_metadata,
+            "modes": [{"pixelformat": m.pixelformat, "width": m.width,
+                       "height": m.height, "rates_hz": list(m.rates_hz),
+                       "compressed": m.compressed} for m in d.modes],
+        } for d in devices], indent=2))
+        return 0
+
+    if not devices:
+        print("no capture devices found", file=sys.stderr)
+        return 1
+
+    for dev in devices:
+        print(f"{dev.path}")
+        print(f"    -> {dev.node}   driver={dev.driver}")
+        print(f"    card: {dev.card}")
+        usb = dev.usb
+        if usb:
+            line = (f"    usb:  {usb.get('vendor_id')}:{usb.get('product_id')} "
+                    f"{usb.get('vendor')} {usb.get('product')} "
+                    f"serial={usb.get('serial')}")
+            if usb.get("speed_mbps"):
+                line += f" link={usb['speed_mbps']} Mbps"
+            print(line)
+        formats: dict[str, list] = {}
+        for m in dev.modes:
+            formats.setdefault(m.pixelformat, []).append(m)
+        for pixfmt, modes in formats.items():
+            tag = " (compressed)" if modes[0].compressed else ""
+            best = max(modes, key=lambda m: (m.width * m.height,
+                                             max(m.rates_hz or (0,))))
+            print(f"    {pixfmt}{tag}: {len(modes)} modes, largest {best}")
+            if args.modes:
+                for m in modes:
+                    print(f"        {m}")
+        print()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

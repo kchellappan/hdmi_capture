@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Record a session to a .mjpg/.idx/manifest.json triple.
+
+Frames are stored exactly as the card produced them, each with the kernel's
+CLOCK_MONOTONIC timestamp. Stop with Ctrl-C: the manifest is finalized on the way out, so
+an interrupted session is still a readable recording.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import signal
+import sys
+import time
+
+import _bootstrap  # noqa: F401
+from vcap.device import find_capture_card
+from vcap.session import Session
+from vcap.source import NoSignal, StreamError
+from vcap.writer import WriterOverrun
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("directory", help="where to write the session")
+    ap.add_argument("-d", "--device", help="by-id path, /dev/videoN, or a name substring")
+    ap.add_argument("--format", default="MJPG")
+    ap.add_argument("--size", default="1920x1080", help="WIDTHxHEIGHT (default 1920x1080)")
+    ap.add_argument("--fps", type=float, default=60.0)
+    ap.add_argument("--seconds", type=float, help="stop after this long")
+    ap.add_argument("--frames", type=int, help="stop after this many frames")
+    ap.add_argument("--name", default="session", help="basename for the files")
+    ap.add_argument("--buffers", type=int, default=4,
+                    help="kernel buffers; more tolerates disk stalls, adds latency")
+    ap.add_argument("--queue", type=int, default=240,
+                    help="writer queue depth in frames (default 240)")
+    ap.add_argument("--fsync-every", type=int, default=0,
+                    help="fsync every N frames; 0 lets the OS decide")
+    ap.add_argument("--segment-mb", type=int, default=2048,
+                    help="roll over at this size; 0 disables (default 2048)")
+    ap.add_argument("--patience", type=float, default=5.0,
+                    help="seconds of no signal to tolerate before giving up")
+    ap.add_argument("--note", action="append", default=[], metavar="KEY=VALUE",
+                    help="free-form metadata to record in the manifest")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    width, _, height = args.size.partition("x")
+    notes = {}
+    for item in args.note:
+        key, _, value = item.partition("=")
+        notes[key] = value
+
+    try:
+        device = find_capture_card(args.device)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    stopping = False
+
+    def on_signal(_signo, _frame):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    session = Session(
+        args.directory, device, pixelformat=args.format,
+        width=int(width), height=int(height), fps=args.fps, name=args.name,
+        buffers=args.buffers, queue_depth=args.queue,
+        segment_bytes=args.segment_mb * 1024 * 1024 if args.segment_mb else 0,
+        fsync_every=args.fsync_every, patience=args.patience, notes=notes)
+
+    exit_code = 0
+    try:
+        with session as s:
+            neg = s.source.negotiated
+            if not args.quiet:
+                print(f"{device.path}")
+                print(f"  granted: {neg.pixelformat} {neg.width}x{neg.height} "
+                      f"@ {neg.fps_granted or '?'} fps")
+                print(f"  timestamps: {neg.timestamp_clock}, {neg.timestamp_source}")
+                if not neg.timestamps_are_monotonic:
+                    print("  WARNING: timestamps are not on CLOCK_MONOTONIC, so they "
+                          "cannot be aligned against controls captured here",
+                          file=sys.stderr)
+                print(f"  writing to {args.directory}/\n", flush=True)
+
+            deadline = time.monotonic() + args.seconds if args.seconds else None
+            count = 0
+            last_report = time.monotonic()
+            for _frame in s.frames():
+                count += 1
+                if stopping:
+                    break
+                if args.frames and count >= args.frames:
+                    break
+                if deadline and time.monotonic() >= deadline:
+                    break
+                now = time.monotonic()
+                if not args.quiet and now - last_report >= 1.0:
+                    st = s.stats()
+                    sys.stderr.write(
+                        f"\r  {st['written']} frames  "
+                        f"{st['bytes'] / 1e6:.0f} MB  "
+                        f"dropped {st['driver_dropped']}  "
+                        f"flagged {st['flagged']}  "
+                        f"queue peak {st['queue_high_water']}   ")
+                    sys.stderr.flush()
+                    last_report = now
+    except NoSignal as exc:
+        print(f"\nno signal: {exc}", file=sys.stderr)
+        exit_code = 1
+    except StreamError as exc:
+        print(f"\nstream failed: {exc}", file=sys.stderr)
+        exit_code = 1
+    except WriterOverrun as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        exit_code = 1
+
+    if not args.quiet:
+        sys.stderr.write("\n")
+        print(json.dumps(session.stats(), indent=2))
+        eff = (session.manifest or {}).get("effective_fps")
+        if eff:
+            print(f"effective rate: {eff:.2f} fps")
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

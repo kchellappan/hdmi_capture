@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite needs no capture card and no packages: synthetic JPEGs in tests/fake.py
+      # stand in for the hardware, so the whole storage path runs here. What cannot run
+      # here is anything touching the device -- see tests/hardware.sh.
+      - name: Test
+        run: ./tests/run_tests.sh
+
+  dependencies:
+    name: No dependencies in the core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Capture, storage and read-back import only the standard library, which is what
+      # lets a repo submodule this one without adding anything to install. Enforced
+      # rather than asserted: that property erodes one convenient import at a time. The
+      # declared exceptions are listed in ALLOWED inside the check.
+      - name: Check imports
+        run: python3 tests/check_stdlib_only.py
+
+  ioctl-abi:
+    name: Kernel ABI constants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A structure whose size is wrong makes every ioctl return ENOTTY, which looks like
+      # an unsupported device rather than a bug here. Worth checking on its own so the
+      # failure names itself.
+      - name: Pin request numbers against videodev2.h
+        run: cd tests && python3 test_ioctl_abi.py
+
+  vivid:
+    name: Capture loop against the kernel's test device
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # vivid is the kernel's virtual video driver. It is not this capture card and
+      # reproduces none of its firmware behaviour, but it does exercise the real ioctl
+      # path, real buffer mmap and real DQBUF -- the parts tests/fake.py cannot reach.
+      - name: Load vivid
+        run: sudo modprobe vivid || echo "vivid unavailable; this job will skip"
+
+      - name: Stream from vivid
+        run: |
+          if [[ ! -e /dev/video0 ]]; then
+            echo "no vivid device; skipping"
+            exit 0
+          fi
+          sudo chmod a+rw /dev/video* || true
+          python3 tests/test_vivid.py
+
+  shell-scripts:
+    name: Shell script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every script
+        run: |
+          fail=0
+          for f in scripts/*.sh tests/*.sh; do
+            if bash -n "$f"; then echo "  ok    $f"; else echo "  FAIL  $f"; fail=1; fi
+          done
+          exit $fail

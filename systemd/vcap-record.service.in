@@ -1,0 +1,60 @@
+# Unattended recording, for a capture box that is not someone's desktop.
+#
+# Install:
+#   sed -e "s|@DIR@|$PWD|" -e "s|@USER@|$(id -un)|" -e "s|@OUT@|/var/lib/vcap|" \
+#       systemd/vcap-record.service.in | sudo tee /etc/systemd/system/vcap-record.service
+#   sudo systemctl daemon-reload && sudo systemctl start vcap-record
+#
+# Read scripts/udev/99-vcap.rules first. A service has no logind session, so it does not
+# get the ACL that makes /dev/video* work from a desktop, and will fail with EACCES
+# without the udev rule and video group membership.
+#
+# And note what this cannot tell you: the card produces a full-rate stream with nothing
+# connected to its HDMI input, so a service that is running happily is not evidence that
+# anything is being recorded. See docs/hardware.md.
+
+[Unit]
+Description=HDMI capture recording
+Documentation=file://@DIR@/README.md
+After=multi-user.target
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=video
+WorkingDirectory=@DIR@
+
+# %%i-style naming is deliberately not used: a recording directory is created per start
+# and a session that overwrites a previous one is worse than one that fails.
+ExecStart=/usr/bin/python3 @DIR@/tools/vcap-record @OUT@/%%Y-%%m-%%dT%%H-%%M-%%S \
+    --fps 60 --size 1920x1080
+
+# SIGINT rather than SIGTERM: vcap-record handles both, finalizing the manifest so an
+# interrupted session stays readable, but SIGINT matches what a person pressing Ctrl-C
+# sends and keeps the two paths identical.
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+# The writer queue is bounded and raises when the disk cannot keep up, so a restart loop
+# on a full disk would spin. Restart on failure but rate-limit it.
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=120
+
+# Recording is latency-sensitive: the driver has only a few buffers and drops frames once
+# they fill. Nice the process up so a busy machine does not cost frames.
+Nice=-5
+IOSchedulingClass=realtime
+IOSchedulingPriority=2
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@OUT@
+# /dev/video* must stay visible, so device access is allowed rather than private.
+DeviceAllow=char-video4linux rw
+
+[Install]
+WantedBy=multi-user.target
