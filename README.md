@@ -80,10 +80,24 @@ and `ring.LatestFrame` — rather than one with a mode flag.
 ## Hardware
 
 Developed against a **MacroSilicon MS2130** (`345f:2131`), sold as a "Rybozen 4K HDMI to
-USB 3.0 capture card" and under many other names. It is UVC class, so `uvcvideo` drives it
-with nothing to install. Measured on it, on live 1080p60 video: **59.76 fps sustained, 901
-frames to disk with no dropped frames** — at **14.5–19 MB/s, or 52–69 GB/hour**, which is
-the number to plan storage against.
+USB 3.0 capture card" and under many other names —
+[the unit used here](https://www.amazon.com/dp/B097DKNS1M). It is UVC class, so `uvcvideo`
+drives it with nothing to install. Measured on it, on live 1080p60 video: **59.76 fps
+sustained, 901 frames to disk with no dropped frames** — at **14.5–19 MB/s, or 52–69
+GB/hour**, which is the number to plan storage against.
+
+Buy on the USB ID, not the listing. Generic capture cards are relabelled constantly, and a
+single marketplace listing can change vendor or silicon without changing its product page —
+so that link is a record of what was bought, not a guarantee of what arrives. What this
+repo's measurements apply to is a device that reports:
+
+```
+$ lsusb | grep -i macrosilicon
+Bus 004 Device 002: ID 345f:2131 MACROSILICON USB3.0 Video
+```
+
+If yours reports `534d:2109` instead, it is the older USB 2.0 MS2109 in similar packaging:
+expect 1080p30, and re-measure everything here.
 
 Read [docs/hardware.md](docs/hardware.md) before a collection run. The traps that cost the
 most:

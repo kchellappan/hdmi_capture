@@ -2,7 +2,9 @@
 
 Measured on the card this repo was built against: **MacroSilicon MS2130**, USB ID
 `345f:2131`, sold as a "Rybozen 4K HDMI to USB 3.0 capture card" and under many other
-names. Everything below was observed on that device on Linux 7.0 with `uvcvideo`; where a
+names. The unit used here was https://www.amazon.com/dp/B097DKNS1M -- though the USB ID
+below is the identifier that matters, since these cards are relabelled constantly and a
+listing can change silicon without changing its page. Everything below was observed on that device on Linux 7.0 with `uvcvideo`; where a
 claim comes from the general UVC chipset family rather than from measurement here, it says
 so.
 
