@@ -161,5 +161,28 @@ run". The capture loop is only ever exercised by hand, against the card, via
 
 ## Workflow
 
+`main` is protected: a pull request is required, six CI checks must pass, the branch must be
+up to date before merging, history stays linear, and force pushes and deletions are refused.
 Branch, PR, squash merge. Commit messages explain *why*, including what was tried and
 rejected — match the existing ones.
+
+Two things about that protection are worth knowing rather than discovering.
+
+**Admin bypass is on.** `enforce_admins` is false, so a push straight to `main` by the repo
+owner succeeds with a `Bypassed rule violations` warning rather than being rejected. It is
+not a wall, it is a speed bump, and the warning scrolls past easily. Treat the PR route as
+the rule anyway.
+
+**Force pushes are refused even so.** That one is enforced for everyone, which is worth
+knowing before assuming a bad commit can be quietly removed — undoing one means lifting the
+rule, pushing, and putting it back.
+
+**Zero approvals are required.** GitHub does not let anyone approve their own pull request,
+so requiring even one would make every PR unmergeable on a single-maintainer repo. The PR
+requirement is there for the CI gate and the diff, not for review theatre.
+
+The required checks are named in the protection rule, so **renaming a CI job silently stops
+gating on it** — the rule keeps waiting for a check that no longer reports. If a job in
+`.github/workflows/ci.yml` is renamed, update the protection too. The vivid job is
+deliberately *not* required: it always skips on GitHub's runners, so requiring it would
+enshrine a check that proves nothing.
