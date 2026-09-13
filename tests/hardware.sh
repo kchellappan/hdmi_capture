@@ -9,6 +9,12 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 DEVICE="${VCAP_DEVICE:-MACROSILICON}"
+
+# One declaration of where the Python package lives, rather than a sys.path line inside
+# every heredoc below. The duplicated version broke silently when the package moved into
+# vcap_py/: CI does not run this suite, so nothing caught it until someone ran it against
+# the card.
+export PYTHONPATH="$PWD/vcap_py${PYTHONPATH:+:$PYTHONPATH}"
 PASS=0; FAIL=0
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; echo "        $2"; FAIL=$((FAIL+1)); }
@@ -26,8 +32,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # ---------------------------------------------------------------- negotiation and clock
 out="$(python3 - <<'PY' 2>&1
-import os, sys
-sys.path.insert(0, os.getcwd())
+import os
 from vcap.device import find_capture_card
 from vcap.source import VideoSource
 d = find_capture_card(os.environ.get("VCAP_DEVICE", "MACROSILICON"))
@@ -96,8 +101,7 @@ fi
 # A fragment that *has* a head and is missing its tail would be a genuinely different
 # fault -- signal loss mid-frame rather than stream-start alignment -- so that one fails.
 shape="$(python3 - <<'FIRSTFRAME' 2>&1
-import os, sys
-sys.path.insert(0, os.getcwd())
+import os
 from vcap.device import find_capture_card
 from vcap.source import VideoSource
 d = find_capture_card(os.environ.get("VCAP_DEVICE", "MACROSILICON"))
