@@ -10,9 +10,14 @@ There is one capture card: a MacroSilicon MS2130, USB `345f:2131`. Everything me
 about it is in [docs/hardware.md](docs/hardware.md) — read that before changing anything in
 `vcap_py/vcap/source.py` or `vcap_py/vcap/device.py`.
 
+The package lives in `vcap_py/vcap/` and the C++ implementation in `vcap_cpp/`; the
+directories name the language, the importable and includable name is `vcap` in both.
+Anything putting this repo on `sys.path` wants `vcap_py`, not the root.
+
 ```bash
-./tests/run_tests.sh     # anywhere: no card, no dependencies
-./tests/hardware.sh      # needs the card plugged in
+./tests/run_tests.sh          # anywhere: no card, no dependencies
+./vcap_cpp/tests/run_tests.sh # builds C++, round-trips through the Python reader
+./tests/hardware.sh           # needs the card plugged in
 ```
 
 The hardware-free suite covers the storage format end to end, which is where a bug costs a
@@ -20,7 +25,9 @@ dataset. It cannot cover format negotiation, buffer `mmap`, kernel timestamps, o
 firmware behaviour. **Say so plainly rather than implying a change is verified when only
 its logic is.** A change to the capture loop that passes `run_tests.sh` is untested.
 
-An HDMI source is *not* required to test — but see below, because that cuts both ways.
+An HDMI source is *not* required for those — but see below, because that cuts both ways.
+`tools/vcap-glass-to-glass` is the exception: it needs a display fed by the card, and
+`python3-tk`, which Debian and Ubuntu package separately.
 
 ## Conventions that are deliberate
 
@@ -72,6 +79,26 @@ should cost nothing to install. Decoding is a genuine exception and lives behind
 is allowed; doing it without a reason in the commit message is not. Do not put a decoder,
 an encoder or a tensor in the core to preserve a tidy import graph.
 
+**One declaration of a fact.** The `vcap_py/` move broke `tests/hardware.sh` because the
+package path was written into every heredoc in it rather than once at the top, and the
+restructure updated the copies that were greppable from Python and missed the ones embedded
+in shell. It reached `main` and survived three merges, because CI cannot run that suite.
+Where a fact must appear twice, say why — `tests/test_ioctl_abi.py` is the one place that
+earns it.
+
+**Do not compute while measuring.** The first end-to-end run of `vcap-glass-to-glass`
+reported a median of 296 ms with a 248 ms spread, and was measuring itself: DC-decoding a
+1080p frame is ~107 ms of pure Python, which saturated the interpreter lock and starved the
+drawing loop, so the pattern on screen went stale and the staleness got measured. Capture
+now stores frames and decodes them afterwards. The giveaway was a standard deviation far
+larger than a frame period; anything timing the display should watch for the same shape.
+
+**A search needs validation proportional to its width.** Locating the bar pattern began by
+trying every pair of bright runs — about a hundred candidate geometries against six bits of
+checksum — and every single-bar corruption still "decoded", just to a different value.
+Narrowing to the four geometries that can actually be right fixed it. The false-decode rate
+is now measured rather than assumed, and `tests/test_barcode.py` holds it to a budget.
+
 **Neither this repo nor a control repo owns "episode".** That belongs to whatever repo
 submodules both. See [docs/composition.md](docs/composition.md). A change that makes this
 repo import a control library, or vice versa, breaks the property that either can be used
@@ -84,13 +111,16 @@ Do not re-derive these:
 | Trap | Where |
 |---|---|
 | Frames arrive with no HDMI input connected | `docs/hardware.md`, and asserted in `tests/hardware.sh` |
-| The first frame after `STREAMON` is a headless fragment, on 33 of 34 starts | `docs/hardware.md`; the cause is stream-start alignment, *not* a missing HDMI input |
+| The first frame after `STREAMON` is a headless fragment, on 39 of 40 starts | `docs/hardware.md`; the cause is stream-start alignment, *not* a missing HDMI input |
 | UVC descriptors advertise unsustainable modes | `docs/hardware.md`, and why `vcap_py/vcap/probe.py` exists |
 | `/dev/videoN` numbering moves; two nodes per device | `vcap_py/vcap/device.py` docstring |
 | `/dev/video*` access is a logind ACL, not the `video` group | `docs/hardware.md`, `scripts/install_deps.sh` |
 | `v4l2_format` needs 4 bytes of padding after `type` | the `Format` docstring in `vcap_py/vcap/v4l2.py` |
 | A container loses the exact per-frame timestamp | `docs/formats.md`, and the header of `vcap_py/vcap/export/to_mp4.py` |
 | `at()` without a tolerance always returns a frame | `vcap_py/vcap/reader.py`, `docs/timebase.md` |
+| Storage rate is content, not resolution: 2.5 to 19 MB/s on the same card | `docs/formats.md`, three measurements |
+| Frame loss is per frame, not per second, so a slower rate does not make any frame safer | `docs/hardware.md`, measured at 30 and 60 Hz |
+| A window need not be fullscreen for the latency pattern; it locates itself | `vcap_py/vcap/barcode.py`; Chrome's `--kiosk` silently does not take on GNOME/Wayland |
 
 ## What CI does and does not cover
 
@@ -108,6 +138,7 @@ run". The capture loop is only ever exercised by hand, against the card, via
 
 ## Known unfinished
 
+- **Runs beyond 20 minutes** are untested, as is behaviour with a nearly full disk.
 - **One card, one machine.** A second identical unit is untested and may collide on
   `by-id` — this chipset family often ships a shared firmware serial. `by-path` would
   distinguish them at the cost of pinning a physical port.
@@ -118,8 +149,11 @@ run". The capture loop is only ever exercised by hand, against the card, via
 - **Audio is untouched.** The card exposes an ALSA device. The MS2109's audio path is known
   broken; whether the MS2130's is, is not tested here.
 - **`capture_offset_ns` is never populated automatically,** and should not be.
-  `tools/vcap-latency` supplies only the video half of the measurement; the other half comes
-  from a control recording this repo cannot see.
+  `tools/vcap-glass-to-glass` now measures it end to end where the capturing machine also
+  drives the display — about 60 ms ± 6 here — but that is this laptop's display pipeline
+  plus this card, and only the card-and-USB half transfers to another source. The method
+  cannot separate them. `tools/vcap-latency` remains for the case where the source is a
+  console, and supplies only the video half.
 - **`vcap_py/vcap/export/to_lerobot.py` is named in the README's design and not written.**
 - **Cross-machine capture is out of scope and cannot be rescued here.** The single-clock
   guarantee is the foundation of the format; two machines means two clocks and a different

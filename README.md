@@ -6,14 +6,16 @@
 > What that means in practice here. The hardware claims are **measured, not asserted** —
 > the figures in this README and in `docs/hardware.md` came from running against the card
 > named below, and the commit messages record what was measured and what was found wrong.
-> Three documented claims were corrected during development after measurement contradicted
-> them, including a storage figure that was six times too low. The hardware-free test suite
-> was checked by mutation: each test was confirmed to fail when the behaviour it covers is
-> broken. Where a claim is second-hand rather than measured — the MS2109 notes in
+> Six documented claims were corrected during development after measurement contradicted
+> them: a storage figure that was six times too low and later a second one 40% too high, the
+> mechanism and the certainty of the first-frame fragment, whether frame loss scales with
+> time or with frames, and a latency measurement that turned out to be measuring the tool's
+> own CPU load. The hardware-free test suite was checked by mutation: each test was
+> confirmed to fail when the behaviour it covers is broken. Where a claim is second-hand rather than measured — the MS2109 notes in
 > `docs/hardware.md` are the main case — it says so on the spot.
 >
-> What that does **not** cover: one capture card, on one machine, over short sessions. No
-> long-run or multi-day soak, no second card, no non-x86 host, and no review by anyone who
+> What that does **not** cover: one capture card, on one machine. The longest run is 20
+> minutes — no multi-hour soak, no second card, no non-x86 host, and no review by anyone who
 > has shipped a V4L2 binding before. The `Status` section at the bottom lists what is
 > known-untested; it is deliberately specific, and it is not exhaustive.
 
@@ -36,6 +38,7 @@ cd hdmi_capture
 ```
 
 ```python
+import sys; sys.path.insert(0, "vcap_py")      # or put vcap_py on PYTHONPATH
 from vcap import find_capture_card, Recording, Session
 
 device = find_capture_card("MACROSILICON")
@@ -160,6 +163,7 @@ The directories say which language; the name you import or include is `vcap` in 
 | `vcap_py/vcap/session.py` | Source, writer and manifest wired together. |
 | `vcap_py/vcap/jpeg_dc.py` | A baseline JPEG decoder that recovers DC coefficients only, for the latency measurement. Not a substitute for a real decoder. |
 | `vcap_py/vcap/barcode.py` | The bar pattern that carries a timestamp through an HDMI round trip. |
+| `vcap_py/vcap/outputs.py` | Which monitor is which, for placing the latency pattern. |
 | `vcap_py/vcap/decode.py` | The dependency boundary, and why it is there. |
 | `vcap_py/vcap/export/` | MP4/MKV remux and frame extraction. For humans, not for training. |
 
@@ -204,7 +208,8 @@ and needing tensors is an explicit step that says so.
 git submodule add https://github.com/kchellappan/hdmi_capture third_party/hdmi_capture
 ```
 
-Nothing to build. Put the directory on `sys.path` and import `vcap`.
+Nothing to build. Put `third_party/hdmi_capture/vcap_py` on `sys.path` — the package
+directory, not the repo root — and import `vcap`.
 
 Two rules, covered in [docs/composition.md](docs/composition.md): this repo and the control
 capture repo **never import each other**, and **neither owns the word "episode"** — that
@@ -216,13 +221,15 @@ and what it was for.
 There isn't any, for recording — `python3` and a kernel with `uvcvideo` are all it takes.
 `scripts/install_deps.sh` reports what is present and offers to install only what you
 actually need for the optional parts: device access from a service, a C++ toolchain,
-`ffmpeg` for export. `--check` reports without changing anything.
+`python3-tk` for the latency measurement, `ffmpeg` for export. `--check` reports without
+changing anything.
 
 ## Tests
 
 ```bash
-./tests/run_tests.sh     # no hardware, no dependencies
-./tests/hardware.sh      # with the card plugged in
+./tests/run_tests.sh          # no hardware, no dependencies
+./vcap_cpp/tests/run_tests.sh # builds C++, round-trips it through the Python reader
+./tests/hardware.sh           # with the card plugged in
 ```
 
 The hardware-free suite covers the storage format end to end, because that is where a bug
@@ -236,24 +243,33 @@ live in `tests/hardware.sh`.
 
 ## Status
 
-Working and measured on one card, on one machine, over sessions of seconds to a minute.
+Working and measured on one card, on one machine. Verified against the hardware: 1080p60
+sustained, a 20-minute burn-in (72009 frames, 21.2 GB, nine segment rollovers) with no drift
+in drop rate, frame interval or queue depth, a C++ recording read back by the Python reader,
+and an end-to-end latency measurement of roughly 60 ms.
 
-Not exercised on hardware:
+Not exercised:
 
-- **Runs beyond 20 minutes.** A 20-minute burn-in at 1080p60 (72009 frames, 21.2 GB, nine
-  segment rollovers) showed no drift in drop rate, frame interval or queue depth. Nothing
-  has run for hours, and nothing has tested behaviour as a disk approaches full.
+- **Runs beyond 20 minutes**, and behaviour as a disk approaches full.
 - **A second identical card on the same host.** The `by-id` serial may not be unique on
   this chipset family; `by-path` would distinguish them at the cost of pinning a port.
 - **YUYV as a recording format.** It streams — verified on the card at 1280x720 and on a
   UVC webcam at 1080p — but no session has been recorded in it, and the corruption check
   in `source.read()` is MJPEG-only, so a raw capture gets no structural validation.
+- **The capture loop, in CI.** `vivid` is absent from GitHub's runners, so the job that
+  would exercise the real ioctl and `mmap` path skips every time. Everything touching V4L2
+  is verified only by running `tests/hardware.sh` against the card by hand — and a path
+  regression did reach `main` that way once.
 - **Audio**, which this repo does not touch at all.
 - **The MS2109 variant**, and non-x86-64 hosts.
 
-`vcap_py/vcap/export/to_lerobot.py` is named in the design and not written. The display-to-USB
-latency offset (`timebase.capture_offset_ns`) is never populated automatically and needs a
-control recording to measure — see [docs/timebase.md](docs/timebase.md).
+`vcap_py/vcap/export/to_lerobot.py` is named in the design and not written.
+
+`timebase.capture_offset_ns` stays `null` in every manifest and is never filled in
+automatically. `vcap-glass-to-glass` measures it — about **60 ms ± 6** on the development
+setup — but that figure is this laptop's display pipeline plus this card. Only the card and
+USB half transfers to a different source, and the method cannot separate the two. Writing a
+number in is a deliberate act. See [docs/timebase.md](docs/timebase.md).
 
 ## License
 
