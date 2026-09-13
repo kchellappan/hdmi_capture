@@ -83,8 +83,10 @@ Developed against a **MacroSilicon MS2130** (`345f:2131`), sold as a "Rybozen 4K
 USB 3.0 capture card" and under many other names —
 [the unit used here](https://www.amazon.com/dp/B097DKNS1M). It is UVC class, so `uvcvideo`
 drives it with nothing to install. Measured on it, on live 1080p60 video over a 4-minute
-run: **14403 frames to disk at 59.98 fps, 4.27 GB** — at **14.5–19 MB/s, or 52–69 GB/hour**,
-which is the number to plan storage against.
+run: **14403 frames to disk at 59.98 fps, 4.27 GB** — at **14.5–19 MB/s, or 52–69 GB/hour**
+with video on screen, which is the number to plan storage against. A sparse desktop is
+nearer 10.6 MB/s: MJPEG is intra-only, so the rate tracks per-frame detail and the spread
+is entirely content.
 
 Frame rate is settable with `--fps` and honoured exactly — 60, 50, 30, 20 and 10 at 1080p.
 Storage scales linearly with it, since MJPEG compresses each frame independently: **60 Hz is

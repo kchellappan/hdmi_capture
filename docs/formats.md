@@ -150,24 +150,30 @@ round-trip tests both check it deliberately for that reason.
 
 ## Sizing
 
-Measured at 1080p60 on live video from a laptop's HDMI output:
+Measured at 1080p60, on the same card:
 
-| | frame | rate | per hour |
+| what was on screen | frame | rate | per hour |
 |---|---|---|---|
-| Live video content | 210-345 KB | **14.5-19 MB/s** | **52-69 GB** |
+| A YouTube video, full screen | 236-313 KB | **14.5-19 MB/s** | **52-69 GB** |
+| A mostly-dark desktop | 172 KB | 10.6 MB/s | 38 GB |
 | The no-signal placeholder | ~40 KB | 2.5 MB/s | 8.8 GB |
 
-**Plan against the first row.** The placeholder figure is what this card produces with
-nothing connected to its HDMI input, it is about six times smaller, and an earlier version
-of this document quoted it as though it were a capture rate. It is not: it is the cost of
-recording a static blue screen.
+**Plan against the first row.** MJPEG is intra-only, so the rate tracks how much *detail*
+is in each frame -- not motion, and not resolution alone. A screen full of texture costs
+three times a sparse one, and the entire gap between the rows above is content.
 
-MJPEG is intra-only, so the rate scales with how much detail is in each frame rather than
-with motion. Expect the high end of that range for anything busy, and note that a policy
-collection run of a hundred two-minute episodes is on the order of 170 GB.
+Two figures here were wrong in earlier versions of this document, both because each was
+measured once and written down as general. The placeholder rate was quoted as though it
+were a capture rate -- it is the cost of recording a static blue screen, and it made the
+storage estimate six times too low. Then the video figure was quoted as the whole story,
+which overstates a desktop by about 40%. **Measure your own content before sizing a disk**;
+a twenty-second recording is enough.
 
-A 2 GB segment is therefore about **two and a half minutes**, not the fourteen this
-document previously claimed.
+A hundred two-minute episodes is on the order of 130-170 GB, depending on what is on
+screen.
+
+A 2 GB segment is therefore between two and a half and four and a half minutes -- not the
+fourteen this document once claimed, and not a fixed duration either.
 
 If that is too much to keep, `vcap_py/vcap/export/to_mp4.py` re-encodes to H.264 at a large
 saving. Archive with it; do not train from it.
